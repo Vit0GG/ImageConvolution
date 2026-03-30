@@ -62,4 +62,21 @@ public class ConvolutionTests
         Assert.NotNull(Kernels.Sharpen);
         Assert.NotNull(Kernels.Laplacian);
     }
+
+    [Fact]
+        public void Test_ConvolveParallel_ZeroPadding()
+        {
+            double[,] image = {
+                { 10, 10, 10 },
+                { 10, 10, 10 },
+                { 10, 10, 10 }
+            };
+
+            double[,] result = ParallelConvolutionProcessor.ConvolveParallel(
+                image, 
+                Kernels.BlurBox, 
+                ParallelConvolutionProcessor.EdgeStrategy.ZeroPadding);
+
+            Assert.True(result[0, 0] < 10);
+        }
 }
