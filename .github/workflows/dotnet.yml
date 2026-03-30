@@ -1,0 +1,51 @@
+name: Multi-Platform CI
+
+on:
+  push:
+    branches: [ "main", "master", "**" ]      
+  pull_request:
+    branches: [ "main", "master" ]    
+
+jobs:
+  build_and_test:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest] 
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v5
+      with:
+        dotnet-version: 9.0.x
+
+    - name: Restore dependencies
+      run: dotnet restore ImageConvolution.sln
+
+    - name: Check Code Style (Linter)
+      run: dotnet format ImageConvolution.sln --verify-no-changes --verbosity diagnostic
+
+    - name: Build
+      run: dotnet build ImageConvolution.sln --no-restore
+
+    - name: Test with Coverage
+      run: |
+        dotnet test ImageConvolution.sln --no-build --verbosity normal /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura /p:Threshold=95 /p:ThresholdType=line
+
+    - name: Generate Code Coverage Summary
+      if: matrix.os == 'ubuntu-latest'
+      uses: irongut/CodeCoverageSummary@v1.3.0
+      with:
+        filename: '**/coverage.cobertura.xml'
+        badge: true
+        format: markdown
+        output: both
+
+    - name: Write to Job Summary
+      if: matrix.os == 'ubuntu-latest'
+      run: cat code-coverage-results.md >> $GITHUB_STEP_SUMMARY

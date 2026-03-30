@@ -1,0 +1,30 @@
+﻿Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ImageConvolution", "ImageConvolution\ImageConvolution.csproj", "{366F9E9B-3DEE-BEE8-0CF1-D84253E77B0C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ImageConvolution.Tests", "ImageConvolution.Tests\ImageConvolution.Tests.csproj", "{FB977A44-684F-4F89-8B10-BA9BEEEDA052}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{366F9E9B-3DEE-BEE8-0CF1-D84253E77B0C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{366F9E9B-3DEE-BEE8-0CF1-D84253E77B0C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{366F9E9B-3DEE-BEE8-0CF1-D84253E77B0C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{366F9E9B-3DEE-BEE8-0CF1-D84253E77B0C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FB977A44-684F-4F89-8B10-BA9BEEEDA052}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FB977A44-684F-4F89-8B10-BA9BEEEDA052}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FB977A44-684F-4F89-8B10-BA9BEEEDA052}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FB977A44-684F-4F89-8B10-BA9BEEEDA052}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D5CD6449-722F-4DAC-A988-17CD82DA006C}
+	EndGlobalSection
+EndGlobal
