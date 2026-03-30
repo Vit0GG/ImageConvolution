@@ -3,12 +3,14 @@ using System.Data;
 using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
+using System.Diagnostics.CodeAnalysis;
 
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
 namespace ImageConvolution
 {
+    [ExcludeFromCodeCoverage]
     class Program
     {
         static void Main(string[] args)
