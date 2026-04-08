@@ -15,59 +15,81 @@ namespace ImageConvolution
     {
         static void Main(string[] args)
         {
+
             Console.WriteLine("=== Программа свёртки изображений ===");
-            Console.Write("Введите путь к изображению (перетащите файл в консоль): ");
+            Console.WriteLine("1. Обработать один файл");
+            Console.WriteLine("2. Обработать набор файлов");
+            Console.WriteLine("3. Обработать набор файлов агентами");
 
-            string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
+            string? choice = Console.ReadLine();
 
-            if (string.IsNullOrEmpty(inputPath) || !File.Exists(inputPath))
+            if (choice == "1")
             {
-                Console.WriteLine("Ошибка: Файл не найден! Проверьте путь и попробуйте снова.");
-                return;
+                Console.Write("Введите путь к изображению: ");
+                string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (!File.Exists(inputPath)) return;
+                
+                double[,] img = ImageIO.LoadAsGrayscale(inputPath);
+                double[,] res = ConvolutionProcessor.Convolve(img, Kernels.BlurBox);
+
+                string directory = Path.GetDirectoryName(inputPath)!;
+                string fileNameOnly = Path.GetFileNameWithoutExtension(inputPath);
+                string extension = Path.GetExtension(inputPath);
+
+                string baseOutputPath = Path.Combine(directory, $"{fileNameOnly}_filtered");
+
+                int counter = 1;
+                string finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+
+                while (File.Exists(finalOutputPath))
+                {
+                    counter++;
+                    finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+                }
+
+                ImageIO.SaveImage(res, finalOutputPath);
+                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{finalOutputPath}");
             }
 
-            string directory = Path.GetDirectoryName(inputPath) ?? "";
-            string fileName = Path.GetFileNameWithoutExtension(inputPath);
-            string extension = Path.GetExtension(inputPath);
-            string outputPath = Path.Combine(directory, fileName + "_filtered" + extension);
-
-            try
+            else if (choice == "2")
             {
-                Console.WriteLine("\n1. Загрузка изображения...");
-                double[,] image = ImageIO.LoadAsGrayscale(inputPath);
+                Console.WriteLine("Введите исходный путь к папке или перетащите её");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
 
-                Console.WriteLine("2. Применение свёртки (Размытие / Blur)...");
-                Stopwatch sw = Stopwatch.StartNew();
+                if (string.IsNullOrEmpty(inputDir)) return;
 
-                double[,] result = ConvolutionProcessor.Convolve(
-                    image,
-                    Kernels.BlurBox,
-                    ConvolutionProcessor.EdgeStrategy.Extend);
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir) ?? "", "Processed_Output");
 
-                sw.Stop();
-                Console.WriteLine("2.1. Применение параллельной свёртки (Размытие / Blur)...");
-                Stopwatch sw1 = Stopwatch.StartNew();
 
-                double[,] result2 = ParallelConvolutionProcessor.ConvolveParallel(
-                    image,
-                    Kernels.BlurBox,
-                    ParallelConvolutionProcessor.EdgeStrategy.Extend);
+                Console.WriteLine("\n--- ТЕСТ 1: Только внешний параллелизм (Параллельно файлы) ---");
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Seq", false);
 
-                sw1.Stop();
-
-                Console.WriteLine($"Свёртка завершена за {sw.ElapsedMilliseconds} мс");
-
-                Console.WriteLine($"Параллельная свёртка завершена за {sw1.ElapsedMilliseconds} мс");
-
-                Console.WriteLine("3. Сохранение результата...");
-                ImageIO.SaveImage(result, outputPath);
-
-                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{outputPath}");
+                Console.WriteLine("\n--- ТЕСТ 2: Вложенный параллелизм (Параллельно файлы) ---");
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Par", true);
             }
-            catch (Exception ex)
+
+            else if (choice == "3")
             {
-                Console.WriteLine($"Произошла ошибка: {ex.Message}");
+                Console.WriteLine("Введите путь к папке:");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
+
+                Console.Write("Введите количество агентов для свёртки(от количества ядер на устройстве): ");
+                if (!int.TryParse(Console.ReadLine(), out int workerCount))
+                {
+                    workerCount = Environment.ProcessorCount;
+                }
+
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Agent_Processed_Output");
+
+                AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir, workerCount);
             }
+
+            else
+            {
+                Console.WriteLine("Неверный выбор.");
+            }
+
         }
     }
 

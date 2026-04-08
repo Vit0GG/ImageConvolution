@@ -482,3 +482,11 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# Ignore generated output directories
+*Output*
+*Output/
+
+# Ignore test-generated directories
+test_input_*
+test_output_*
