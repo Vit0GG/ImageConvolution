@@ -80,7 +80,7 @@ public class ConvolutionTests
         Assert.True(result[0, 0] < 10);
     }
 
-        private void CreateTestImage(string directory, string filename)
+    private void CreateTestImage(string directory, string filename)
     {
         Directory.CreateDirectory(directory);
         double[,] dummyPixelData = new double[2, 2] { { 128, 128 }, { 128, 128 } };
@@ -162,8 +162,8 @@ public class ConvolutionTests
         string outputDir = "output_abc";
 
         BatchProcessor.ProcessImagesNaiveParallel(nonExistentDir, outputDir, false);
-        
-        Assert.False(Directory.Exists(outputDir)); 
+
+        Assert.False(Directory.Exists(outputDir));
     }
 
     [Fact]

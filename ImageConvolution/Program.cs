@@ -28,7 +28,7 @@ namespace ImageConvolution
                 Console.Write("Введите путь к изображению: ");
                 string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
                 if (!File.Exists(inputPath)) return;
-                
+
                 double[,] img = ImageIO.LoadAsGrayscale(inputPath);
                 double[,] res = ConvolutionProcessor.Convolve(img, Kernels.BlurBox);
 
