@@ -482,3 +482,7 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+Agent_Processed_Output/
+Processed_Output_*/
+*Output*/
