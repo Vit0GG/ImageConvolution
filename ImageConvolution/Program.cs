@@ -10,70 +10,86 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace ImageConvolution
 {
-    public enum EdgeStrategy
-    {
-        Extend,
-        ZeroPadding
-    }
-
     [ExcludeFromCodeCoverage]
     class Program
     {
         static void Main(string[] args)
         {
+
             Console.WriteLine("=== Программа свёртки изображений ===");
-            Console.Write("Введите путь к изображению (перетащите файл в консоль): ");
+            Console.WriteLine("1. Обработать один файл");
+            Console.WriteLine("2. Обработать набор файлов");
+            Console.WriteLine("3. Обработать набор файлов агентами");
 
-            string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
+            string? choice = Console.ReadLine();
 
-            if (string.IsNullOrEmpty(inputPath) || !File.Exists(inputPath))
+            if (choice == "1")
             {
-                Console.WriteLine("Ошибка: Файл не найден! Проверьте путь и попробуйте снова.");
-                return;
+                Console.Write("Введите путь к изображению: ");
+                string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (!File.Exists(inputPath)) return;
+
+                double[,] img = ImageIO.LoadAsGrayscale(inputPath);
+                double[,] res = ConvolutionProcessor.Convolve(img, Kernels.BlurBox);
+
+                string directory = Path.GetDirectoryName(inputPath)!;
+                string fileNameOnly = Path.GetFileNameWithoutExtension(inputPath);
+                string extension = Path.GetExtension(inputPath);
+
+                string baseOutputPath = Path.Combine(directory, $"{fileNameOnly}_filtered");
+
+                int counter = 1;
+                string finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+
+                while (File.Exists(finalOutputPath))
+                {
+                    counter++;
+                    finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+                }
+
+                ImageIO.SaveImage(res, finalOutputPath);
+                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{finalOutputPath}");
             }
 
-            string directory = Path.GetDirectoryName(inputPath) ?? "";
-            string fileName = Path.GetFileNameWithoutExtension(inputPath);
-            string extension = Path.GetExtension(inputPath);
-            string outputPath = Path.Combine(directory, fileName + "_filtered" + extension);
-
-            try
+            else if (choice == "2")
             {
-                Console.WriteLine("\n1. Загрузка изображения...");
-                double[,] image = ImageIO.LoadAsGrayscale(inputPath);
+                Console.WriteLine("Введите исходный путь к папке или перетащите её");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
 
-                Console.WriteLine("2. Применение свёртки (Размытие / Blur)...");
-                Stopwatch sw = Stopwatch.StartNew();
+                if (string.IsNullOrEmpty(inputDir)) return;
 
-                double[,] result = ConvolutionProcessor.Convolve(
-                    image,
-                    Kernels.BlurBox,
-                    EdgeStrategy.Extend);
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir) ?? "", "Processed_Output");
 
-                sw.Stop();
-                Console.WriteLine("2.1. Применение параллельной свёртки (Размытие / Blur)...");
-                Stopwatch sw1 = Stopwatch.StartNew();
 
-                double[,] result2 = ParallelConvolutionProcessor.ConvolveParallel(
-                    image,
-                    Kernels.BlurBox,
-                    EdgeStrategy.Extend);
+                Console.WriteLine("\n--- ТЕСТ 1: Только внешний параллелизм (Параллельно файлы) ---");
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Seq", false);
 
-                sw1.Stop();
-
-                Console.WriteLine($"Свёртка завершена за {sw.ElapsedMilliseconds} мс");
-
-                Console.WriteLine($"Параллельная свёртка завершена за {sw1.ElapsedMilliseconds} мс");
-
-                Console.WriteLine("3. Сохранение результата...");
-                ImageIO.SaveImage(result, outputPath);
-
-                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{outputPath}");
+                Console.WriteLine("\n--- ТЕСТ 2: Вложенный параллелизм (Параллельно файлы) ---");
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Par", true);
             }
-            catch (Exception ex)
+
+            else if (choice == "3")
             {
-                Console.WriteLine($"Произошла ошибка: {ex.Message}");
+                Console.WriteLine("Введите путь к папке:");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
+
+                Console.Write("Введите количество агентов для свёртки(от количества ядер на устройстве): ");
+                if (!int.TryParse(Console.ReadLine(), out int workerCount))
+                {
+                    workerCount = Environment.ProcessorCount;
+                }
+
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Agent_Processed_Output");
+
+                AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir, workerCount);
             }
+
+            else
+            {
+                Console.WriteLine("Неверный выбор.");
+            }
+
         }
     }
 
@@ -140,53 +156,59 @@ namespace ImageConvolution
 
     public class ConvolutionProcessor
     {
-        internal static double CalculatePixelValue(double[,] image, double[,] kernel, int x, int y, EdgeStrategy strategy)
+        public enum EdgeStrategy
         {
-            double sum = 0.0;
-            int imgheight = image.GetLength(0);
-            int imgwidth = image.GetLength(1);
-            int kheight = kernel.GetLength(0);
-            int kwidth = kernel.GetLength(1);
-            int offsetY = kheight / 2;
-            int offsetX = kwidth / 2;
-
-            for (int ky = 0; ky < kheight; ky++)
-            {
-                for (int kx = 0; kx < kwidth; kx++)
-                {
-                    int pixelY = y + ky - offsetY;
-                    int pixelX = x + kx - offsetX;
-                    double pixelValue = 0.0;
-
-                    if (strategy == EdgeStrategy.Extend)
-                    {
-                        pixelY = Math.Clamp(pixelY, 0, imgheight - 1);
-                        pixelX = Math.Clamp(pixelX, 0, imgwidth - 1);
-                        pixelValue = image[pixelY, pixelX];
-                    }
-                    else if (strategy == EdgeStrategy.ZeroPadding)
-                    {
-                        if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
-                        {
-                            pixelValue = image[pixelY, pixelX];
-                        }
-                    }
-                    sum += pixelValue * kernel[ky, kx];
-                }
-            }
-            return sum;
+            Extend,
+            ZeroPadding
         }
 
         public static double[,] Convolve(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
         {
             int imgheight = image.GetLength(0);
             int imgwidth = image.GetLength(1);
+            int kheight = kernel.GetLength(0);
+            int kwidth = kernel.GetLength(1);
+
+            int offsetY = kheight / 2;
+            int offsetX = kwidth / 2;
+
             double[,] result = new double[imgheight, imgwidth];
+
             for (int y = 0; y < imgheight; y++)
             {
                 for (int x = 0; x < imgwidth; x++)
                 {
-                    result[y, x] = CalculatePixelValue(image, kernel, x, y, strategy);
+                    double sum = 0.0;
+
+                    for (int ky = 0; ky < kheight; ky++)
+                    {
+                        for (int kx = 0; kx < kwidth; kx++)
+                        {
+                            int pixelY = y + ky - offsetY;
+                            int pixelX = x + kx - offsetX;
+                            double pixelValue = 0.0;
+
+                            if (strategy == EdgeStrategy.Extend)
+                            {
+                                if (pixelY < 0) pixelY = 0;
+                                if (pixelY >= imgheight) pixelY = imgheight - 1;
+                                if (pixelX < 0) pixelX = 0;
+                                if (pixelX >= imgwidth) pixelX = imgwidth - 1;
+
+                                pixelValue = image[pixelY, pixelX];
+                            }
+                            else if (strategy == EdgeStrategy.ZeroPadding)
+                            {
+                                if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
+                                {
+                                    pixelValue = image[pixelY, pixelX];
+                                }
+                            }
+                            sum += pixelValue * kernel[ky, kx];
+                        }
+                    }
+
+                    result[y, x] = sum;
                 }
             }
             return result;
@@ -194,21 +216,60 @@ namespace ImageConvolution
     }
     public class ParallelConvolutionProcessor
     {
+        public enum EdgeStrategy
+        {
+            Extend,
+            ZeroPadding
+        }
 
         public static double[,] ConvolveParallel(double[,] image, double[,] kernal, EdgeStrategy strategy = EdgeStrategy.Extend)
         {
-            int imgheight = image.GetLength(0);
             int imgwidth = image.GetLength(1);
-            double[,] result = new double[imgheight, imgwidth];
+            int imgheight = image.GetLength(0);
+            int kwidth = kernal.GetLength(0);
+            int kheight = kernal.GetLength(1);
 
+            int offsetX = kwidth / 2;
+            int offsetY = kheight / 2;
+
+            double[,] result2 = new double[imgheight, imgwidth];
             Parallel.For(0, imgheight, y =>
             {
                 for (int x = 0; x < imgwidth; x++)
                 {
-                    result[y, x] = ConvolutionProcessor.CalculatePixelValue(image, kernal, x, y, strategy);
+                    double sum = 0.0;
+
+                    for (int ky = 0; ky < kheight; ky++)
+                    {
+                        for (int kx = 0; kx < kwidth; kx++)
+                        {
+                            int pixelY = y + ky - offsetY;
+                            int pixelX = x + kx - offsetX;
+                            double pixelValue = 0.0;
+
+                            if (strategy == EdgeStrategy.Extend)
+                            {
+                                if (pixelY < 0) pixelY = 0;
+                                if (pixelY >= imgheight) pixelY = imgheight - 1;
+                                if (pixelX < 0) pixelX = 0;
+                                if (pixelX >= imgwidth) pixelX = imgwidth - 1;
+
+                                pixelValue = image[pixelY, pixelX];
+                            }
+                            else if (strategy == EdgeStrategy.ZeroPadding)
+                            {
+                                if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
+                                {
+                                    pixelValue = image[pixelY, pixelX];
+                                }
+                            }
+                            sum += pixelValue * kernal[ky, kx];
+                        }
+                    }
+                    result2[y, x] = sum;
                 }
             });
-            return result;
+            return result2;
         }
     }
 }

@@ -79,4 +79,102 @@ public class ConvolutionTests
 
         Assert.True(result[0, 0] < 10);
     }
+
+    private void CreateTestImage(string directory, string filename)
+    {
+        Directory.CreateDirectory(directory);
+        double[,] dummyPixelData = new double[2, 2] { { 128, 128 }, { 128, 128 } };
+        string fullPath = Path.Combine(directory, filename);
+        ImageIO.SaveImage(dummyPixelData, fullPath);
+    }
+
+    [Fact]
+    public void Test_BatchProcessor_Naive_Sequential()
+    {
+        string inputDir = "test_input_naive_seq";
+        string outputDir = "test_output_naive_seq";
+
+        try
+        {
+            CreateTestImage(inputDir, "test1.jpg");
+
+            BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir, false);
+
+            Assert.True(Directory.Exists(outputDir));
+            Assert.Single(Directory.GetFiles(outputDir));
+        }
+        finally
+        {
+            if (Directory.Exists(inputDir)) Directory.Delete(inputDir, true);
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        }
+    }
+
+    [Fact]
+    public void Test_BatchProcessor_Naive_Parallel()
+    {
+        string inputDir = "test_input_naive_par";
+        string outputDir = "test_output_naive_par";
+
+        try
+        {
+            CreateTestImage(inputDir, "test1.jpg");
+
+            BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir, true);
+
+            Assert.True(Directory.Exists(outputDir));
+            Assert.Single(Directory.GetFiles(outputDir));
+        }
+        finally
+        {
+            if (Directory.Exists(inputDir)) Directory.Delete(inputDir, true);
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        }
+    }
+
+    [Fact]
+    public void Test_AgentProcessor_Success()
+    {
+        string inputDir = "test_input_agents";
+        string outputDir = "test_output_agents";
+
+        try
+        {
+            CreateTestImage(inputDir, "test1.jpg");
+            CreateTestImage(inputDir, "test2.jpg");
+
+            AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir, workerCount: 2);
+
+            Assert.True(Directory.Exists(outputDir));
+            Assert.Equal(2, Directory.GetFiles(outputDir).Length);
+        }
+        finally
+        {
+            if (Directory.Exists(inputDir)) Directory.Delete(inputDir, true);
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        }
+    }
+
+    [Fact]
+    public void Test_BatchProcessor_NonExistentFolder()
+    {
+        string nonExistentDir = "non_existent_folder_abc_123";
+        string outputDir = "output_abc";
+
+        BatchProcessor.ProcessImagesNaiveParallel(nonExistentDir, outputDir, false);
+
+        Assert.False(Directory.Exists(outputDir));
+    }
+
+    [Fact]
+    public void Test_AgentProcessor_NonExistentFolder()
+    {
+        string nonExistentDir = "non_existent_folder_xyz_999";
+        string outputDir = "output_xyz";
+
+        AgentProcessor.ProcessImagesWithAgents(nonExistentDir, outputDir, 2);
+
+        Assert.False(Directory.Exists(outputDir));
+    }
+
 }
