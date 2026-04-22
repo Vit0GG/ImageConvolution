@@ -35,7 +35,7 @@ public class ConvolutionTests
     public void Test_Convolve_ExtendStrategy()
     {
         double[,] image = { { 10, 10, 10 }, { 10, 10, 10 }, { 10, 10, 10 } };
-        double[,] result = ConvolutionProcessor.Convolve(image, Kernels.BlurBox, ConvolutionProcessor.EdgeStrategy.Extend);
+        double[,] result = ConvolutionProcessor.Convolve(image, Kernels.BlurBox, EdgeStrategy.Extend);
         Assert.Equal(10, Math.Round(result[1, 1]));
     }
 
@@ -43,7 +43,7 @@ public class ConvolutionTests
     public void Test_Convolve_ZeroPaddingStrategy()
     {
         double[,] image = { { 10, 10, 10 }, { 10, 10, 10 }, { 10, 10, 10 } };
-        double[,] result = ConvolutionProcessor.Convolve(image, Kernels.BlurBox, ConvolutionProcessor.EdgeStrategy.ZeroPadding);
+        double[,] result = ConvolutionProcessor.Convolve(image, Kernels.BlurBox, EdgeStrategy.ZeroPadding);
         Assert.True(result[0, 0] < 10);
     }
 
@@ -51,7 +51,7 @@ public class ConvolutionTests
     public void Test_ConvolveParallel()
     {
         double[,] image = { { 100, 100, 100 }, { 100, 100, 100 }, { 100, 100, 100 } };
-        double[,] result = ParallelConvolutionProcessor.ConvolveParallel(image, Kernels.BlurBox, ParallelConvolutionProcessor.EdgeStrategy.Extend);
+        double[,] result = ParallelConvolutionProcessor.ConvolveParallel(image, Kernels.BlurBox, EdgeStrategy.Extend);
         Assert.Equal(100, Math.Round(result[1, 1]));
     }
 
@@ -75,7 +75,7 @@ public class ConvolutionTests
         double[,] result = ParallelConvolutionProcessor.ConvolveParallel(
             image,
             Kernels.BlurBox,
-            ParallelConvolutionProcessor.EdgeStrategy.ZeroPadding);
+            EdgeStrategy.ZeroPadding);
 
         Assert.True(result[0, 0] < 10);
     }

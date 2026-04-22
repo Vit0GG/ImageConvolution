@@ -483,10 +483,9 @@ $RECYCLE.BIN/
 # Vim temporary swap files
 *.swp
 
-# Ignore generated output directories
-*Output*
-*Output/
-
-# Ignore test-generated directories
 test_input_*
 test_output_*
+ImageConvolution/Agent_Processed_Output/
+ImageConvolution/Processed_Output_Par/
+ImageConvolution/Processed_Output_Seq/
+ImageConvolution/Processed_Output_*/
