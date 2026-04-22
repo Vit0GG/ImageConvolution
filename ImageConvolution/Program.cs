@@ -10,6 +10,12 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace ImageConvolution
 {
+    public enum EdgeStrategy
+    {
+        Extend,
+        ZeroPadding
+    }
+
     [ExcludeFromCodeCoverage]
     class Program
     {
@@ -42,7 +48,7 @@ namespace ImageConvolution
                 double[,] result = ConvolutionProcessor.Convolve(
                     image,
                     Kernels.BlurBox,
-                    ConvolutionProcessor.EdgeStrategy.Extend);
+                    EdgeStrategy.Extend);
 
                 sw.Stop();
                 Console.WriteLine("2.1. Применение параллельной свёртки (Размытие / Blur)...");
@@ -51,7 +57,7 @@ namespace ImageConvolution
                 double[,] result2 = ParallelConvolutionProcessor.ConvolveParallel(
                     image,
                     Kernels.BlurBox,
-                    ParallelConvolutionProcessor.EdgeStrategy.Extend);
+                    EdgeStrategy.Extend);
 
                 sw1.Stop();
 
@@ -134,59 +140,53 @@ namespace ImageConvolution
 
     public class ConvolutionProcessor
     {
-        public enum EdgeStrategy
+        internal static double CalculatePixelValue(double[,] image, double[,] kernel, int x, int y, EdgeStrategy strategy)
         {
-            Extend,
-            ZeroPadding
+            double sum = 0.0;
+            int imgheight = image.GetLength(0);
+            int imgwidth = image.GetLength(1);
+            int kheight = kernel.GetLength(0);
+            int kwidth = kernel.GetLength(1);
+            int offsetY = kheight / 2;
+            int offsetX = kwidth / 2;
+
+            for (int ky = 0; ky < kheight; ky++)
+            {
+                for (int kx = 0; kx < kwidth; kx++)
+                {
+                    int pixelY = y + ky - offsetY;
+                    int pixelX = x + kx - offsetX;
+                    double pixelValue = 0.0;
+
+                    if (strategy == EdgeStrategy.Extend)
+                    {
+                        pixelY = Math.Clamp(pixelY, 0, imgheight - 1);
+                        pixelX = Math.Clamp(pixelX, 0, imgwidth - 1);
+                        pixelValue = image[pixelY, pixelX];
+                    }
+                    else if (strategy == EdgeStrategy.ZeroPadding)
+                    {
+                        if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
+                        {
+                            pixelValue = image[pixelY, pixelX];
+                        }
+                    }
+                    sum += pixelValue * kernel[ky, kx];
+                }
+            }
+            return sum;
         }
 
         public static double[,] Convolve(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
         {
             int imgheight = image.GetLength(0);
             int imgwidth = image.GetLength(1);
-            int kheight = kernel.GetLength(0);
-            int kwidth = kernel.GetLength(1);
-
-            int offsetY = kheight / 2;
-            int offsetX = kwidth / 2;
-
             double[,] result = new double[imgheight, imgwidth];
-
             for (int y = 0; y < imgheight; y++)
             {
                 for (int x = 0; x < imgwidth; x++)
                 {
-                    double sum = 0.0;
-
-                    for (int ky = 0; ky < kheight; ky++)
-                    {
-                        for (int kx = 0; kx < kwidth; kx++)
-                        {
-                            int pixelY = y + ky - offsetY;
-                            int pixelX = x + kx - offsetX;
-                            double pixelValue = 0.0;
-
-                            if (strategy == EdgeStrategy.Extend)
-                            {
-                                if (pixelY < 0) pixelY = 0;
-                                if (pixelY >= imgheight) pixelY = imgheight - 1;
-                                if (pixelX < 0) pixelX = 0;
-                                if (pixelX >= imgwidth) pixelX = imgwidth - 1;
-
-                                pixelValue = image[pixelY, pixelX];
-                            }
-                            else if (strategy == EdgeStrategy.ZeroPadding)
-                            {
-                                if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
-                                {
-                                    pixelValue = image[pixelY, pixelX];
-                                }
-                            }
-                            sum += pixelValue * kernel[ky, kx];
-                        }
-                    }
-
-                    result[y, x] = sum;
+                    result[y, x] = CalculatePixelValue(image, kernel, x, y, strategy);
                 }
             }
             return result;
@@ -194,60 +194,21 @@ namespace ImageConvolution
     }
     public class ParallelConvolutionProcessor
     {
-        public enum EdgeStrategy
-        {
-            Extend,
-            ZeroPadding
-        }
 
         public static double[,] ConvolveParallel(double[,] image, double[,] kernal, EdgeStrategy strategy = EdgeStrategy.Extend)
         {
-            int imgwidth = image.GetLength(1);
             int imgheight = image.GetLength(0);
-            int kwidth = kernal.GetLength(0);
-            int kheight = kernal.GetLength(1);
+            int imgwidth = image.GetLength(1);
+            double[,] result = new double[imgheight, imgwidth];
 
-            int offsetX = kwidth / 2;
-            int offsetY = kheight / 2;
-
-            double[,] result2 = new double[imgheight, imgwidth];
             Parallel.For(0, imgheight, y =>
             {
                 for (int x = 0; x < imgwidth; x++)
                 {
-                    double sum = 0.0;
-
-                    for (int ky = 0; ky < kheight; ky++)
-                    {
-                        for (int kx = 0; kx < kwidth; kx++)
-                        {
-                            int pixelY = y + ky - offsetY;
-                            int pixelX = x + kx - offsetX;
-                            double pixelValue = 0.0;
-
-                            if (strategy == EdgeStrategy.Extend)
-                            {
-                                if (pixelY < 0) pixelY = 0;
-                                if (pixelY >= imgheight) pixelY = imgheight - 1;
-                                if (pixelX < 0) pixelX = 0;
-                                if (pixelX >= imgwidth) pixelX = imgwidth - 1;
-
-                                pixelValue = image[pixelY, pixelX];
-                            }
-                            else if (strategy == EdgeStrategy.ZeroPadding)
-                            {
-                                if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
-                                {
-                                    pixelValue = image[pixelY, pixelX];
-                                }
-                            }
-                            sum += pixelValue * kernal[ky, kx];
-                        }
-                    }
-                    result2[y, x] = sum;
+                    result[y, x] = ConvolutionProcessor.CalculatePixelValue(image, kernal, x, y, strategy);
                 }
             });
-            return result2;
+            return result;
         }
     }
 }
