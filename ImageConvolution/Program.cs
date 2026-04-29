@@ -21,60 +21,222 @@ namespace ImageConvolution
     {
         static void Main(string[] args)
         {
+
             Console.WriteLine("=== Программа свёртки изображений ===");
-            Console.Write("Введите путь к изображению (перетащите файл в консоль): ");
+            Console.WriteLine("1. Обработать один файл");
+            Console.WriteLine("2. Обработать набор файлов");
+            Console.WriteLine("3. Обработать набор файлов агентами");
+            Console.WriteLine("4. Сравнить с библиотекой ImageSharp");
+            string? choice = Console.ReadLine();
 
-            string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
-
-            if (string.IsNullOrEmpty(inputPath) || !File.Exists(inputPath))
+            if (choice == "1")
             {
-                Console.WriteLine("Ошибка: Файл не найден! Проверьте путь и попробуйте снова.");
-                return;
+                Console.Write("Введите путь к изображению: ");
+                string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (!File.Exists(inputPath)) return;
+
+                double[,] img = ImageIO.LoadAsGrayscale(inputPath);
+
+                double seqMs = MeasureMedianMs(() =>
+                {
+                    _ = ConvolutionProcessor.Convolve(img, Kernels.BlurBox, EdgeStrategy.Extend);
+                });
+
+                double parMs = MeasureMedianMs(() =>
+                {
+                    _ = ParallelConvolutionProcessor.ConvolveParallel(img, Kernels.BlurBox, EdgeStrategy.Extend);
+                });
+
+                Console.WriteLine($"Compute only (median): seq={seqMs:F3} ms, parallel={parMs:F3} ms");
+                double[,] res = ConvolutionProcessor.Convolve(img, Kernels.BlurBox);
+
+                string directory = Path.GetDirectoryName(inputPath)!;
+                string fileNameOnly = Path.GetFileNameWithoutExtension(inputPath);
+                string extension = Path.GetExtension(inputPath);
+
+                string baseOutputPath = Path.Combine(directory, $"{fileNameOnly}_filtered");
+
+                int counter = 1;
+                string finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+
+                while (File.Exists(finalOutputPath))
+                {
+                    counter++;
+                    finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+                }
+
+                ImageIO.SaveImage(res, finalOutputPath);
+                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{finalOutputPath}");
+            }
+            else if (choice == "2")
+            {
+                Console.WriteLine("Введите исходный путь к папке или перетащите её");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
+
+                if (string.IsNullOrEmpty(inputDir)) return;
+
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir) ?? "", "Processed_Output");
+
+                Console.WriteLine("Прогрев...");
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Warmup", false);
+
+                Console.WriteLine("\n--- ТЕСТ 1: Только внешний параллелизм (последовательная свёртка) ---");
+                var times1 = MeasureMultipleRuns(() =>
+                {
+                    BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Seq", false);
+                }, 3);
+
+                Console.WriteLine($"  Среднее: {times1.Average():F1} мс");
+                Console.WriteLine($"  Медиана: {CalculateMedian(times1):F1} мс");
+                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times1):F1} мс");
+
+                Console.WriteLine("\n--- ТЕСТ 2: Вложенный параллелизм (параллельная свёртка) ---");
+                var times2 = MeasureMultipleRuns(() =>
+                {
+                    BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Par", true);
+                }, 3);
+
+                Console.WriteLine($"  Среднее: {times2.Average():F1} мс");
+                Console.WriteLine($"  Медиана: {CalculateMedian(times2):F1} мс");
+                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times2):F1} мс");
+            }
+            else if (choice == "3")
+            {
+                Console.WriteLine("Введите путь к папке:");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
+
+                Console.Write("Введите количество агентов для свёртки (от количества ядер на устройстве): ");
+                if (!int.TryParse(Console.ReadLine(), out int workerCount))
+                {
+                    workerCount = Environment.ProcessorCount;
+                }
+
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Agent_Processed_Output");
+
+                Console.WriteLine("Прогрев...");
+                AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir + "_Warmup", workerCount);
+
+                Console.WriteLine($"\n--- Обработка агентами ({workerCount} агентов) ---");
+                var times = MeasureMultipleRuns(() =>
+                {
+                    AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir, workerCount);
+                }, 3);
+
+                Console.WriteLine($"  Среднее: {times.Average():F1} мс");
+                Console.WriteLine($"  Медиана: {CalculateMedian(times):F1} мс");
+                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times):F1} мс");
+            }
+            else if (choice == "4")
+            {
+                Console.WriteLine("Введите путь к папке:");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
+
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "ImageSharp_Output");
+
+                double ms = MeasureMedianMs(() =>
+                {
+                    if (Directory.Exists(outputDir))
+                    {
+                        Directory.Delete(outputDir, true);
+                    }
+
+                    LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
+                });
+
+                Console.WriteLine($"ImageSharp blur (median): {ms:F3} ms");
+            }
+            else
+            {
+                Console.WriteLine("Неверный выбор.");
             }
 
-            string directory = Path.GetDirectoryName(inputPath) ?? "";
-            string fileName = Path.GetFileNameWithoutExtension(inputPath);
-            string extension = Path.GetExtension(inputPath);
-            string outputPath = Path.Combine(directory, fileName + "_filtered" + extension);
+        }
+        static double MeasureMedianMs(Action action, int warmupRuns = 2, int measuredRuns = 5)
+        {
+            var currentProcess = Process.GetCurrentProcess();
+            var oldPriority = currentProcess.PriorityClass;
 
             try
             {
-                Console.WriteLine("\n1. Загрузка изображения...");
-                double[,] image = ImageIO.LoadAsGrayscale(inputPath);
+                currentProcess.PriorityClass = ProcessPriorityClass.High;
 
-                Console.WriteLine("2. Применение свёртки (Размытие / Blur)...");
-                Stopwatch sw = Stopwatch.StartNew();
+                for (int i = 0; i < warmupRuns; i++)
+                {
+                    action();
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
+                }
 
-                double[,] result = ConvolutionProcessor.Convolve(
-                    image,
-                    Kernels.BlurBox,
-                    EdgeStrategy.Extend);
+                var times = new List<double>();
 
-                sw.Stop();
-                Console.WriteLine("2.1. Применение параллельной свёртки (Размытие / Blur)...");
-                Stopwatch sw1 = Stopwatch.StartNew();
+                for (int i = 0; i < measuredRuns; i++)
+                {
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                    GC.Collect();
 
-                double[,] result2 = ParallelConvolutionProcessor.ConvolveParallel(
-                    image,
-                    Kernels.BlurBox,
-                    EdgeStrategy.Extend);
+                    long startTimestamp = Stopwatch.GetTimestamp();
+                    action();
+                    long endTimestamp = Stopwatch.GetTimestamp();
 
-                sw1.Stop();
+                    double elapsedMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
+                    times.Add(elapsedMs);
+                }
 
-                Console.WriteLine($"Свёртка завершена за {sw.ElapsedMilliseconds} мс");
-
-                Console.WriteLine($"Параллельная свёртка завершена за {sw1.ElapsedMilliseconds} мс");
-
-                Console.WriteLine("3. Сохранение результата...");
-                ImageIO.SaveImage(result, outputPath);
-
-                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{outputPath}");
+                return CalculateMedian(times);
             }
-            catch (Exception ex)
+            finally
             {
-                Console.WriteLine($"Произошла ошибка: {ex.Message}");
+                currentProcess.PriorityClass = oldPriority;
             }
         }
+        static List<double> MeasureMultipleRuns(Action action, int runs)
+        {
+            var times = new List<double>();
+
+            for (int i = 0; i < runs; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+
+                long startTimestamp = Stopwatch.GetTimestamp();
+                action();
+                long endTimestamp = Stopwatch.GetTimestamp();
+
+                double elapsedMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
+                times.Add(elapsedMs);
+                Console.WriteLine($"  Прогон {i + 1}: {elapsedMs:F1} мс");
+            }
+
+            return times;
+        }
+
+        static double CalculateMedian(List<double> values)
+        {
+            var sorted = values.OrderBy(x => x).ToList();
+            int count = sorted.Count;
+
+            if (count % 2 == 0)
+            {
+                return (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0;
+            }
+            else
+            {
+                return sorted[count / 2];
+            }
+        }
+
+        static double CalculateStdDev(List<double> values)
+        {
+            double avg = values.Average();
+            double sumOfSquares = values.Sum(val => (val - avg) * (val - avg));
+            return Math.Sqrt(sumOfSquares / values.Count);
+        }
+
     }
 
     public class ImageIO
