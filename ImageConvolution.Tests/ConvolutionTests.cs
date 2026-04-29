@@ -177,4 +177,58 @@ public class ConvolutionTests
         Assert.False(Directory.Exists(outputDir));
     }
 
+    [Fact]
+    public void Test_LibraryProcessor_Parallel_Success()
+    {
+        string inputDir = "test_input_lib_par";
+        string outputDir = "test_output_lib_par";
+        try
+        {
+            CreateTestImage(inputDir, "lib_test.jpg");
+            LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
+
+            Assert.True(Directory.Exists(outputDir));
+            Assert.Single(Directory.GetFiles(outputDir));
+        }
+        finally
+        {
+            if (Directory.Exists(inputDir)) Directory.Delete(inputDir, true);
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        }
+    }
+
+    [Fact]
+    public void Test_CustomKernelSize_5x5()
+    {
+        double[,] image = new double[10, 10];
+        for (int i = 0; i < 10; i++)
+            for (int j = 0; j < 10; j++) image[i, j] = 100;
+
+        double[,] kernel5x5 = new double[5, 5];
+        for (int i = 0; i < 5; i++)
+            for (int j = 0; j < 5; j++) kernel5x5[i, j] = 1.0 / 25.0;
+
+        double[,] result = ConvolutionProcessor.Convolve(image, kernel5x5, EdgeStrategy.Extend);
+        Assert.Equal(100, Math.Round(result[5, 5]));
+    }
+
+    [Fact]
+    public void Test_SharpenAndLaplacianKernels()
+    {
+        double[,] image = { { 50, 50, 50 }, { 50, 50, 50 }, { 50, 50, 50 } };
+
+        var resLapl = ConvolutionProcessor.Convolve(image, Kernels.Laplacian);
+        var resSharp = ConvolutionProcessor.Convolve(image, Kernels.Sharpen);
+
+        Assert.Equal(0, Math.Round(resLapl[1, 1]));
+        Assert.Equal(50, Math.Round(resSharp[1, 1]));
+    }
+
+    [Fact]
+    public void Test_LibraryProcessor_NonExistentFolder()
+    {
+        LibraryProcessor.ProcessImagesWithImageSharp("non_existent_folder_123", "output_123");
+        Assert.False(Directory.Exists("output_123"));
+    }
+
 }
