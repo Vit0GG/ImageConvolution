@@ -1,13 +1,9 @@
 using System;
-using System.ComponentModel.DataAnnotations;
 using System.Diagnostics;
 using System.IO;
-using System.IO.Enumeration;
 using System.Net;
 using System.Runtime.Intrinsics.Arm;
 using System.Threading.Tasks;
-
-using SixLabors.ImageSharp;
 
 namespace ImageConvolution
 {
@@ -31,7 +27,6 @@ namespace ImageConvolution
 
             Console.WriteLine($"Найдено файлов: {files.Length}");
 
-            Stopwatch sw = Stopwatch.StartNew();
 
             Parallel.ForEach(files, currentFile =>
             {
@@ -52,12 +47,7 @@ namespace ImageConvolution
                 }
 
                 ImageIO.SaveImage(result, savePath);
-
-                Console.WriteLine($"Обработан файл: {fileName}");
             });
-
-            sw.Stop();
-            Console.WriteLine($"Пакетная обработка завершена за {sw.ElapsedMilliseconds} мс.");
         }
     }
 }
