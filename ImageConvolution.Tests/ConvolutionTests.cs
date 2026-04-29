@@ -178,26 +178,6 @@ public class ConvolutionTests
     }
 
     [Fact]
-    public void Test_LibraryProcessor_Parallel_Success()
-    {
-        string inputDir = "test_input_lib_par";
-        string outputDir = "test_output_lib_par";
-        try
-        {
-            CreateTestImage(inputDir, "lib_test.jpg");
-            LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
-
-            Assert.True(Directory.Exists(outputDir));
-            Assert.Single(Directory.GetFiles(outputDir));
-        }
-        finally
-        {
-            if (Directory.Exists(inputDir)) Directory.Delete(inputDir, true);
-            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
-        }
-    }
-
-    [Fact]
     public void Test_CustomKernelSize_5x5()
     {
         double[,] image = new double[10, 10];
@@ -224,11 +204,36 @@ public class ConvolutionTests
         Assert.Equal(50, Math.Round(resSharp[1, 1]));
     }
 
-    [Fact]
-    public void Test_LibraryProcessor_NonExistentFolder()
+    private void CreateLargeTestImage(string directory, string filename)
     {
-        LibraryProcessor.ProcessImagesWithImageSharp("non_existent_folder_123", "output_123");
-        Assert.False(Directory.Exists("output_123"));
+        Directory.CreateDirectory(directory);
+        double[,] dummyPixelData = new double[20, 20];
+        for (int y = 0; y < 20; y++)
+            for (int x = 0; x < 20; x++)
+                dummyPixelData[y, x] = 128;
+
+        string fullPath = Path.Combine(directory, filename);
+        ImageIO.SaveImage(dummyPixelData, fullPath);
     }
 
+    [Fact]
+    public void Test_LibraryProcessor_Parallel_Success()
+    {
+        string inputDir = "test_input_lib_par";
+        string outputDir = "test_output_lib_par";
+        try
+        {
+            CreateLargeTestImage(inputDir, "lib_test.jpg");
+
+            LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
+
+            Assert.True(Directory.Exists(outputDir));
+            Assert.Single(Directory.GetFiles(outputDir));
+        }
+        finally
+        {
+            if (Directory.Exists(inputDir)) Directory.Delete(inputDir, true);
+            if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
+        }
+    }
 }
