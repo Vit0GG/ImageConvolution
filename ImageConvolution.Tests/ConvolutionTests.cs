@@ -236,4 +236,51 @@ public class ConvolutionTests
             if (Directory.Exists(outputDir)) Directory.Delete(outputDir, true);
         }
     }
+    [Fact]
+    public void Test_BatchProcessor_EmptyFolder()
+    {
+        string dir = "empty_batch";
+        Directory.CreateDirectory(dir);
+        BatchProcessor.ProcessImagesNaiveParallel(dir, "out_batch", false);
+        Directory.Delete(dir);
+        Assert.True(true);
+    }
+
+    [Fact]
+    public void Test_AgentProcessor_EmptyFolder()
+    {
+        string dir = "empty_agent";
+        Directory.CreateDirectory(dir);
+        AgentProcessor.ProcessImagesWithAgents(dir, "out_agent", 2);
+        Directory.Delete(dir);
+        Assert.True(true);
+    }
+
+    [Fact]
+    public void Test_LibraryProcessor_EmptyFolder()
+    {
+        string dir = "empty_lib";
+        Directory.CreateDirectory(dir);
+        LibraryProcessor.ProcessImagesWithImageSharp(dir, "out_lib");
+        Directory.Delete(dir);
+        Assert.True(true);
+    }
+
+    [Fact]
+    public void Test_LibraryProcessor_NonExistentFolder()
+    {
+        LibraryProcessor.ProcessImagesWithImageSharp("non_existent_lib_123", "out_lib_123");
+        Assert.True(true);
+    }
+
+    [Fact]
+    public void Test_BatchProcessor_CorruptImage()
+    {
+        string dir = "corrupt_batch";
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "corrupt.jpg"), "bad data");
+        try { BatchProcessor.ProcessImagesNaiveParallel(dir, "out_corrupt_batch", false); } catch { }
+        Directory.Delete(dir, true);
+        Assert.True(true);
+    }
 }

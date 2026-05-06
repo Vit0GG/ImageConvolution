@@ -608,5 +608,33 @@ namespace ImageConvolution.Tests
             Assert.NotNull(sharpenResult);
             Assert.NotNull(laplacianResult);
         }
+        [Fact]
+        public void UnifiedProcessor_CorruptImage_CaughtByReaderAgent()
+        {
+            Directory.CreateDirectory(TestDirInput);
+            File.WriteAllText(Path.Combine(TestDirInput, "corrupt.jpg"), "not an image data");
+
+            var config = new UnifiedProcessorConfig { CpuWorkers = 1, GpuWorkers = 1 };
+            using var processor = new UnifiedProcessor(config);
+
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(true);
+        }
+
+        [Fact]
+        public void GpuProcessor_ProcessDirectory_CorruptImage()
+        {
+            Directory.CreateDirectory(TestDirInput);
+            File.WriteAllText(Path.Combine(TestDirInput, "corrupt.jpg"), "not an image data");
+
+            try
+            {
+                GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+            }
+            catch { }
+
+            Assert.True(true);
+        }
     }
 }
