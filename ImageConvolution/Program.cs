@@ -29,6 +29,8 @@ namespace ImageConvolution
             Console.WriteLine("4. Сравнить с библиотекой ImageSharp");
             Console.WriteLine("5. Обработать файл на GPU");
             Console.WriteLine("6. Создать 4K тестовые изображения");
+            Console.WriteLine("7. Unified обработка (CPU + GPU)");
+
             string? choice = Console.ReadLine();
 
             if (choice == "1")
@@ -217,7 +219,44 @@ namespace ImageConvolution
                 }
                 Console.WriteLine($"Готово, Папка: {outputDir}");
             }
+            else if (choice == "7")
+            {
+                Console.WriteLine("Введите путь к папке:");
+                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
+                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
 
+                Console.Write("CPU воркеров (Enter для auto): ");
+                string? cpuInput = Console.ReadLine();
+                int cpuWorkers = string.IsNullOrEmpty(cpuInput) ? Environment.ProcessorCount / 2 : int.Parse(cpuInput);
+
+                Console.Write("GPU воркеров (Enter для 1): ");
+                string? gpuInput = Console.ReadLine();
+                int gpuWorkers = string.IsNullOrEmpty(gpuInput) ? 1 : int.Parse(gpuInput);
+
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Unified_Output");
+
+                var config = new UnifiedProcessorConfig
+                {
+                    CpuWorkers = cpuWorkers,
+                    GpuWorkers = gpuWorkers,
+                    ReaderThreads = 2,
+                    WriterThreads = 2,
+                    Kernel = Kernels.BlurBoxFloat,
+                    Strategy = EdgeStrategy.Extend
+                };
+
+                Console.WriteLine("\nПрогрев...");
+                using (var processor = new UnifiedProcessor(config))
+                {
+                    processor.ProcessDirectory(inputDir, outputDir + "_Warmup");
+                }
+
+                Console.WriteLine("\n\n=== Основной запуск ===");
+                using (var processor = new UnifiedProcessor(config))
+                {
+                    processor.ProcessDirectory(inputDir, outputDir);
+                }
+            }
             else
             {
                 Console.WriteLine("Неверный выбор.");

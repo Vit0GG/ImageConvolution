@@ -120,5 +120,224 @@ namespace ImageConvolution.Tests
             string fullPath = Path.Combine(directory, filename);
             ImageIO.SaveImageFloat(dummyPixelData, fullPath);
         }
+        [Fact]
+        public void UnifiedProcessor_CanBeConstructedAndDisposed()
+        {
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 1,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            Assert.NotNull(processor);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_ProcessesDirectoryWithCpuOnly()
+        {
+            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 2,
+                GpuWorkers = 0,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(Directory.Exists(TestDirOutput));
+            Assert.Equal(2, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_ProcessesDirectoryWithGpuOnly()
+        {
+            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 0,
+                GpuWorkers = 1,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(Directory.Exists(TestDirOutput));
+            Assert.Equal(2, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_ProcessesDirectoryWithMixedWorkers()
+        {
+            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "test3.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 1,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(Directory.Exists(TestDirOutput));
+            Assert.Equal(3, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_HandlesNonExistentDirectory()
+        {
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory("non_existent_12345", TestDirOutput);
+
+            Assert.False(Directory.Exists(TestDirOutput));
+        }
+
+        [Fact]
+        public void UnifiedProcessor_HandlesEmptyDirectory()
+        {
+            Directory.CreateDirectory(TestDirInput);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(Directory.Exists(TestDirOutput));
+            Assert.Empty(Directory.GetFiles(TestDirOutput));
+        }
+
+        [Fact]
+        public void UnifiedProcessor_UsesConfiguredKernel()
+        {
+            CreateTestImageFloat(TestDirInput, "test.jpg", 10, 10);
+
+            var customKernel = new float[3, 3]
+            {
+                { 0, 0, 0 },
+                { 0, 1, 0 },
+                { 0, 0, 0 }
+            };
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 0,
+                Kernel = customKernel
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Single(Directory.GetFiles(TestDirOutput));
+        }
+
+        [Fact]
+        public void UnifiedProcessor_UsesConfiguredEdgeStrategy()
+        {
+            CreateTestImageFloat(TestDirInput, "test.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 0,
+                Strategy = EdgeStrategy.ZeroPadding
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Single(Directory.GetFiles(TestDirOutput));
+        }
+
+        [Fact]
+        public void UnifiedProcessor_MultipleReadersAndWriters()
+        {
+            for (int i = 0; i < 5; i++)
+            {
+                CreateTestImageFloat(TestDirInput, $"test{i}.jpg", 10, 10);
+            }
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 2,
+                GpuWorkers = 1,
+                ReaderThreads = 3,
+                WriterThreads = 3
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Equal(5, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void ProcessingTask_PropertiesAreSettable()
+        {
+            var task = new ProcessingTask
+            {
+                InputPath = "input.jpg",
+                OutputPath = "output.jpg",
+                ImageData = new float[5, 5]
+            };
+
+            Assert.Equal("input.jpg", task.InputPath);
+            Assert.Equal("output.jpg", task.OutputPath);
+            Assert.NotNull(task.ImageData);
+        }
+
+        [Fact]
+        public void ProcessingResult_PropertiesAreSettable()
+        {
+            var result = new ProcessingResult
+            {
+                OutputPath = "output.jpg",
+                ResultData = new float[5, 5],
+                ProcessedBy = ProcessorType.GPU
+            };
+
+            Assert.Equal("output.jpg", result.OutputPath);
+            Assert.NotNull(result.ResultData);
+            Assert.Equal(ProcessorType.GPU, result.ProcessedBy);
+        }
+
+        [Fact]
+        public void UnifiedProcessorConfig_DefaultValuesAreCorrect()
+        {
+            var config = new UnifiedProcessorConfig();
+
+            Assert.True(config.CpuWorkers > 0);
+            Assert.Equal(1, config.GpuWorkers);
+            Assert.Equal(2, config.ReaderThreads);
+            Assert.Equal(2, config.WriterThreads);
+            Assert.NotNull(config.Kernel);
+            Assert.Equal(EdgeStrategy.Extend, config.Strategy);
+        }
     }
 }
