@@ -118,7 +118,7 @@ namespace ImageConvolution
             }
             Directory.CreateDirectory(outputDirectory);
 
-            string[] files = Directory.GetFiles(inputDirectory, "*.jpg");
+            string[] files = Directory.GetFiles(inputDirectory, "*.jpg").OrderBy(f => f).ToArray();
             if (files.Length == 0)
             {
                 Console.WriteLine("Файлы .jpg не найдены.");
