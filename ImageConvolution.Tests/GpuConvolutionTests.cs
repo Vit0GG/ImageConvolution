@@ -461,5 +461,152 @@ namespace ImageConvolution.Tests
             Assert.Equal(ProcessorType.GPU, ProcessorType.GPU);
             Assert.NotEqual(ProcessorType.CPU, ProcessorType.GPU);
         }
+        [Fact]
+        public void UnifiedProcessor_LargeNumberOfFiles_ProcessesAll()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                CreateTestImageFloat(TestDirInput, $"test{i:D3}.jpg", 10, 10);
+            }
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 2,
+                GpuWorkers = 1,
+                ReaderThreads = 2,
+                WriterThreads = 2
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Equal(10, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void ConvolveGpu_EdgePixels_ExtendStrategy()
+        {
+            using var gpuProcessor = new GpuConvolutionProcessor();
+            var image = new float[5, 5];
+            for (int y = 0; y < 5; y++)
+                for (int x = 0; x < 5; x++)
+                    image[y, x] = (y == 0 || x == 0 || y == 4 || x == 4) ? 255f : 128f;
+
+            var result = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+
+            Assert.NotNull(result);
+            Assert.True(result[0, 0] > 0);
+            Assert.True(result[4, 4] > 0);
+        }
+
+        [Fact]
+        public void ConvolveGpu_EdgePixels_ZeroPaddingStrategy()
+        {
+            using var gpuProcessor = new GpuConvolutionProcessor();
+            var image = new float[5, 5];
+            for (int y = 0; y < 5; y++)
+                for (int x = 0; x < 5; x++)
+                    image[y, x] = 200f;
+
+            var result = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.ZeroPadding);
+
+            Assert.NotNull(result);
+            Assert.True(result[0, 0] < result[2, 2]);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_MixedImageSizes_OnlyProcessesFirst()
+        {
+            CreateTestImageFloat(TestDirInput, "small.jpg", 5, 5);
+            CreateTestImageFloat(TestDirInput, "medium.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "large.jpg", 15, 15);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 0
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(Directory.Exists(TestDirOutput));
+            var files = Directory.GetFiles(TestDirOutput);
+            Assert.True(files.Length >= 1);
+        }
+
+        [Fact]
+        public void ProcessDirectory_MultipleIdenticalSizeImages_ProcessesAll()
+        {
+            for (int i = 0; i < 3; i++)
+            {
+                CreateTestImageFloat(TestDirInput, $"image{i}.jpg", 20, 20);
+            }
+
+            GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.SharpenFloat, EdgeStrategy.ZeroPadding);
+
+            Assert.Equal(3, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_OnlyGpuWorkers_ProcessesCorrectly()
+        {
+            CreateTestImageFloat(TestDirInput, "gpu1.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "gpu2.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "gpu3.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 0,
+                GpuWorkers = 2,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Equal(3, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_HighParallelism_ProcessesCorrectly()
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                CreateTestImageFloat(TestDirInput, $"parallel{i}.jpg", 10, 10);
+            }
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 4,
+                GpuWorkers = 1,
+                ReaderThreads = 4,
+                WriterThreads = 4
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Equal(8, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void ConvolveGpu_AllKernelTypes_Work()
+        {
+            using var gpuProcessor = new GpuConvolutionProcessor();
+            var image = new float[10, 10];
+            for (int y = 0; y < 10; y++)
+                for (int x = 0; x < 10; x++)
+                    image[y, x] = 100f;
+
+            var blurResult = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+            var sharpenResult = gpuProcessor.ConvolveGpu(image, Kernels.SharpenFloat, EdgeStrategy.Extend);
+            var laplacianResult = gpuProcessor.ConvolveGpu(image, Kernels.LaplacianFloat, EdgeStrategy.Extend);
+
+            Assert.NotNull(blurResult);
+            Assert.NotNull(sharpenResult);
+            Assert.NotNull(laplacianResult);
+        }
     }
 }
