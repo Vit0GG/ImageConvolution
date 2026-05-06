@@ -315,7 +315,11 @@ namespace ImageConvolution
 
         public void Dispose()
         {
-            cts.Cancel();
+            if (!cts.IsCancellationRequested)
+            {
+                cts.Cancel();
+            }
+
             readQueue?.Dispose();
             writeQueue?.Dispose();
 

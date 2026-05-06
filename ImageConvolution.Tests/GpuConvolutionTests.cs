@@ -339,5 +339,127 @@ namespace ImageConvolution.Tests
             Assert.NotNull(config.Kernel);
             Assert.Equal(EdgeStrategy.Extend, config.Strategy);
         }
+        [Fact]
+        public void UnifiedProcessor_DisposeMultipleTimes_DoesNotThrow()
+        {
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 0
+            };
+
+            var processor = new UnifiedProcessor(config);
+            processor.Dispose();
+            processor.Dispose();
+        }
+
+        [Fact]
+        public void GpuProcessor_DisposeMultipleTimes_DoesNotThrow()
+        {
+            var processor = new GpuConvolutionProcessor();
+            processor.Dispose();
+            processor.Dispose();
+        }
+
+        [Fact]
+        public void ConvolveGpu_LargerKernel_ProcessesCorrectly()
+        {
+            using var gpuProcessor = new GpuConvolutionProcessor();
+            var image = new float[10, 10];
+            for (int i = 0; i < 10; i++)
+                for (int j = 0; j < 10; j++)
+                    image[i, j] = 50f;
+
+            var largeKernel = new float[5, 5];
+            for (int i = 0; i < 5; i++)
+                for (int j = 0; j < 5; j++)
+                    largeKernel[i, j] = 1f / 25f;
+
+            var result = gpuProcessor.ConvolveGpu(image, largeKernel, EdgeStrategy.Extend);
+
+            Assert.NotNull(result);
+            Assert.Equal(10, result.GetLength(0));
+            Assert.Equal(10, result.GetLength(1));
+            Assert.InRange(result[5, 5], 45f, 55f);
+        }
+
+        [Fact]
+        public void UnifiedProcessor_WithZeroWorkers_HandlesGracefully()
+        {
+            CreateTestImageFloat(TestDirInput, "test.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 0,
+                GpuWorkers = 0,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.True(Directory.Exists(TestDirOutput));
+        }
+
+        [Fact]
+        public void ConvolveGpu_SharpenKernel_ProducesValidResult()
+        {
+            using var gpuProcessor = new GpuConvolutionProcessor();
+            var image = new float[10, 10];
+            for (int y = 0; y < 10; y++)
+                for (int x = 0; x < 10; x++)
+                    image[y, x] = (x + y) % 2 == 0 ? 100f : 50f;
+
+            var result = gpuProcessor.ConvolveGpu(image, Kernels.SharpenFloat, EdgeStrategy.Extend);
+
+            Assert.NotNull(result);
+            Assert.Equal(10, result.GetLength(0));
+            Assert.Equal(10, result.GetLength(1));
+        }
+
+        [Fact]
+        public void ConvolveGpu_LaplacianKernel_ProducesValidResult()
+        {
+            using var gpuProcessor = new GpuConvolutionProcessor();
+            var image = new float[10, 10];
+            for (int y = 0; y < 10; y++)
+                for (int x = 0; x < 10; x++)
+                    image[y, x] = 100f;
+
+            var result = gpuProcessor.ConvolveGpu(image, Kernels.LaplacianFloat, EdgeStrategy.ZeroPadding);
+
+            Assert.NotNull(result);
+            Assert.Equal(10, result.GetLength(0));
+            Assert.Equal(10, result.GetLength(1));
+        }
+
+        [Fact]
+        public void UnifiedProcessor_SingleReaderSingleWriter_ProcessesCorrectly()
+        {
+            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+
+            var config = new UnifiedProcessorConfig
+            {
+                CpuWorkers = 1,
+                GpuWorkers = 0,
+                ReaderThreads = 1,
+                WriterThreads = 1
+            };
+
+            using var processor = new UnifiedProcessor(config);
+            processor.ProcessDirectory(TestDirInput, TestDirOutput);
+
+            Assert.Equal(2, Directory.GetFiles(TestDirOutput).Length);
+        }
+
+        [Fact]
+        public void ProcessorType_EnumValues_AreAccessible()
+        {
+            Assert.Equal(ProcessorType.CPU, ProcessorType.CPU);
+            Assert.Equal(ProcessorType.GPU, ProcessorType.GPU);
+            Assert.NotEqual(ProcessorType.CPU, ProcessorType.GPU);
+        }
     }
 }
