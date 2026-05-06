@@ -27,6 +27,8 @@ namespace ImageConvolution
             Console.WriteLine("2. Обработать набор файлов");
             Console.WriteLine("3. Обработать набор файлов агентами");
             Console.WriteLine("4. Сравнить с библиотекой ImageSharp");
+            Console.WriteLine("5. Обработать файл на GPU");
+            Console.WriteLine("6. Создать 4K тестовые изображения");
             string? choice = Console.ReadLine();
 
             if (choice == "1")
@@ -147,6 +149,75 @@ namespace ImageConvolution
 
                 Console.WriteLine($"ImageSharp blur (median): {ms:F3} ms");
             }
+
+            else if (choice == "5")
+            {
+                Console.Write("Введите путь к файлу или папке для обработки на GPU: ");
+                string? path = Console.ReadLine()?.Trim('\"', ' ', '\'');
+
+                if (string.IsNullOrEmpty(path)) return;
+
+                if (File.Exists(path))
+                {
+                    Console.WriteLine("\nРежим: обработка одного файла на GPU.");
+                    float[,] img = ImageIO.LoadAsGrayscaleFloat(path);
+
+                    using var gpuProcessor = new GpuConvolutionProcessor();
+
+                    Console.WriteLine("Прогрев GPU...");
+                    _ = gpuProcessor.ConvolveGpu(img, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+
+                    Console.WriteLine("\n--- Замер производительности свёртки на GPU ---");
+                    double gpuMs = MeasureMedianMs(() =>
+                    {
+                        _ = gpuProcessor.ConvolveGpu(img, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+                    }, warmupRuns: 1, measuredRuns: 5);
+
+                    Console.WriteLine($"\nРезультат: время свёртки (медиана): {gpuMs:F3} мс");
+
+                    string dir = Path.GetDirectoryName(path)!;
+                    string fname = Path.GetFileNameWithoutExtension(path);
+                    string ext = Path.GetExtension(path);
+                    string outputPath = Path.Combine(dir, $"{fname}_gpu_processed{ext}");
+
+                    float[,] res = gpuProcessor.ConvolveGpu(img, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+                    ImageIO.SaveImageFloat(res, outputPath);
+                    Console.WriteLine($"Результат сохранен в: {outputPath}");
+                }
+                else if (Directory.Exists(path))
+                {
+                    Console.WriteLine("\nРежим: пакетная обработка папки на GPU.");
+                    string outputDir = Path.Combine(Path.GetDirectoryName(path)!, "GPU_Batch_Output");
+
+                    GpuConvolutionProcessor.ProcessDirectory(path, outputDir, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+                }
+            }
+
+            else if (choice == "6")
+            {
+                string outputDir = @"C:\Test4K";
+                Directory.CreateDirectory(outputDir);
+
+                int count = 100;
+                Console.WriteLine($"Создание {count} изображений 4K...");
+
+                for (int i = 0; i < count; i++)
+                {
+                    double[,] image = new double[2160, 3840];
+                    var rand = new Random(i);
+                    for (int y = 0; y < 2160; y++)
+                    {
+                        for (int x = 0; x < 3840; x++)
+                        {
+                            image[y, x] = rand.Next(0, 256);
+                        }
+                    }
+                    ImageIO.SaveImage(image, Path.Combine(outputDir, $"test_{i:000}.jpg"));
+                    Console.WriteLine($"Создано: {i + 1}/{count}");
+                }
+                Console.WriteLine($"Готово, Папка: {outputDir}");
+            }
+
             else
             {
                 Console.WriteLine("Неверный выбор.");
@@ -276,6 +347,42 @@ namespace ImageConvolution
             }
             image.Save(path);
         }
+        public static float[,] LoadAsGrayscaleFloat(string path)
+        {
+            using Image<Rgba32> image = Image.Load<Rgba32>(path);
+            int width = image.Width;
+            int height = image.Height;
+            float[,] result = new float[height, width];
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    Rgba32 pixel = image[x, y];
+                    float gray = 0.299f * pixel.R + 0.587f * pixel.G + 0.114f * pixel.B;
+                    result[y, x] = gray;
+                }
+            }
+            return result;
+        }
+
+        public static void SaveImageFloat(float[,] data, string path)
+        {
+            int height = data.GetLength(0);
+            int width = data.GetLength(1);
+
+            using Image<Rgba32> image = new Image<Rgba32>(width, height);
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    float val = data[y, x];
+                    byte gray = (byte)Math.Clamp(val, 0, 255);
+                    image[x, y] = new Rgba32(gray, gray, gray);
+                }
+            }
+            image.Save(path);
+        }
     }
 
     public class Kernels
@@ -297,6 +404,24 @@ namespace ImageConvolution
             {1.0/9.0, 1.0/9.0, 1.0/9.0},
             {1.0/9.0, 1.0/9.0, 1.0/9.0},
             {1.0/9.0, 1.0/9.0, 1.0/9.0}
+        };
+        public static float[,] SharpenFloat = new float[,]
+       {
+            {  0, -1,  0},
+            { -1,  5, -1},
+            {  0, -1,  0}
+       };
+        public static float[,] LaplacianFloat = new float[,]
+        {
+            {-1, -1, -1},
+            {-1,  8, -1},
+            {-1, -1, -1}
+        };
+        public static float[,] BlurBoxFloat = new float[,]
+        {
+            {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f},
+            {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f},
+            {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f}
         };
     }
 
