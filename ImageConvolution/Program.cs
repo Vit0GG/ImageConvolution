@@ -363,7 +363,9 @@ namespace ImageConvolution
             int imgwidth = image.GetLength(1);
             double[,] result = new double[imgheight, imgwidth];
 
-            Parallel.For(0, imgheight, y =>
+            var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
+
+            Parallel.For(0, imgheight, options, y =>
             {
                 for (int x = 0; x < imgwidth; x++)
                 {

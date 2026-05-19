@@ -77,7 +77,6 @@ namespace ImageConvolution
                 {
                     string savePath = Path.Combine(outputDir, result.OriginalFileName);
                     ImageIO.SaveImage(result.ProcessedData, savePath);
-                    Console.WriteLine($"Сохранен файл: {result.OriginalFileName}");
                 }
             });
 

@@ -27,13 +27,13 @@ namespace ImageConvolution
 
             Console.WriteLine($"Найдено файлов: {files.Length}");
 
+            var options = new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount };
 
-            Parallel.ForEach(files, currentFile =>
+
+            Parallel.ForEach(files, options, currentFile =>
             {
                 string fileName = Path.GetFileName(currentFile);
-
                 string savePath = Path.Combine(outputDirectory, fileName);
-
                 double[,] imageData = ImageIO.LoadAsGrayscale(currentFile);
 
                 double[,] result;
