@@ -22,17 +22,47 @@ namespace ImageConvolution
                 Directory.CreateDirectory(outputDirectory);
             }
 
-            string[] files = Directory.GetFiles(inputDirectory, "*.jpg");
+            ImageFiles.ValidateDirectories(inputDirectory, outputDirectory);
+            string[] files = ImageFiles.GetFiles(inputDirectory);
 
-            Parallel.ForEach(files, file =>
+            var options = new ParallelOptions
             {
-                using Image<Rgba32> image = Image.Load<Rgba32>(file);
-
-                image.Mutate(x => x.GaussianBlur(1f));
-
+                MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, ImageFiles.GetInFlightLimit(files, 0, 24))
+            };
+            Parallel.ForEach(files, options, file =>
+            {
                 string savePath = Path.Combine(outputDirectory, Path.GetFileName(file));
-                image.Save(savePath);
+                ImageIO.SaveImageFloat(ConvolveBox(ImageIO.LoadAsGrayscaleFloat(file)), savePath);
             });
+        }
+
+        public static float[,] ConvolveBox(float[,] data)
+        {
+            ConvolutionValidation.Validate(data, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+            using var image = new Image<RgbaVector>(data.GetLength(1), data.GetLength(0));
+            image.ProcessPixelRows(accessor =>
+            {
+                for (int y = 0; y < image.Height; y++)
+                {
+                    var row = accessor.GetRowSpan(y);
+                    for (int x = 0; x < image.Width; x++)
+                    {
+                        float gray = data[y, x] / 255f;
+                        row[x] = new RgbaVector(gray, gray, gray, 1f);
+                    }
+                }
+            });
+            image.Mutate(x => x.BoxBlur(1));
+            var result = new float[image.Height, image.Width];
+            image.ProcessPixelRows(accessor =>
+            {
+                for (int y = 0; y < image.Height; y++)
+                {
+                    var row = accessor.GetRowSpan(y);
+                    for (int x = 0; x < image.Width; x++) result[y, x] = row[x].R * 255f;
+                }
+            });
+            return result;
         }
     }
 }

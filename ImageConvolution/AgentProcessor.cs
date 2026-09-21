@@ -1,89 +1,87 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
-using System.Threading.Tasks;
+using System.Runtime.ExceptionServices;
 
-using Microsoft.VisualBasic;
+namespace ImageConvolution;
 
-namespace ImageConvolution
+public class ImageToProcess
 {
-    public class ImageToProcess
-    {
-        public string FilePath { get; set; } = "";
-    }
+    public string FilePath { get; set; } = "";
+    public double[,] ImageData { get; set; } = new double[0, 0];
+}
 
-    public class ImageResult
-    {
-        public string OriginalFileName { get; set; } = "";
-        public double[,] ProcessedData { get; set; } = new double[0, 0];
-    }
+public class ImageResult
+{
+    public string OriginalFileName { get; set; } = "";
+    public double[,] ProcessedData { get; set; } = new double[0, 0];
+}
 
-
-    public class AgentProcessor
+public class AgentProcessor
+{
+    public static void ProcessImagesWithAgents(string inputDir, string outputDir, int workerCount,
+        int queueCapacity = 4, long memoryBudgetBytes = 0)
     {
-        public static void ProcessImagesWithAgents(string inputDir, string outputDir, int workerCount)
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(workerCount);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
+        ArgumentOutOfRangeException.ThrowIfNegative(memoryBudgetBytes);
+        if (!Directory.Exists(inputDir)) return;
+        ImageFiles.ValidateDirectories(inputDir, outputDir);
+        Directory.CreateDirectory(outputDir);
+        var stopwatch = Stopwatch.StartNew();
+        var files = ImageFiles.GetFiles(inputDir);
+        using var slots = new SemaphoreSlim(ImageFiles.GetInFlightLimit(files, memoryBudgetBytes, 16));
+        using var input = new BlockingCollection<ImageToProcess>(queueCapacity);
+        using var output = new BlockingCollection<ImageResult>(queueCapacity);
+        using var cancellation = new CancellationTokenSource();
+        var token = cancellation.Token;
+        Exception? failure = null;
+        Task Start(Action action) => Task.Factory.StartNew(() =>
         {
-            Console.WriteLine($"Запуск конвейера с {workerCount} агентами");
-            if (!Directory.Exists(inputDir)) return;
-            Directory.CreateDirectory(outputDir);
-
-            var filesToProcessQueue = new BlockingCollection<ImageToProcess>(100);
-            var processedImagesQueue = new BlockingCollection<ImageResult>(100);
-
-            var stopwatch = Stopwatch.StartNew();
-            var readerAgent = Task.Run(() =>
+            try { action(); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception ex)
             {
-
-                foreach (var file in Directory.GetFiles(inputDir, "*jpg"))
-                {
-                    filesToProcessQueue.Add(new ImageToProcess { FilePath = file });
-                }
-
-                filesToProcessQueue.CompleteAdding();
-            });
-
-            var workerAgents = new List<Task>();
-            for (int i = 0; i < workerCount; i++)
-            {
-                var worker = Task.Run(() =>
-                {
-                    foreach (var imageToProcess in filesToProcessQueue.GetConsumingEnumerable())
-                    {
-                        double[,] image = ImageIO.LoadAsGrayscale(imageToProcess.FilePath);
-                        double[,] processedImage = ConvolutionProcessor.Convolve(image, Kernels.BlurBox);
-                        var ResultForQue = new ImageResult
-                        {
-                            OriginalFileName = Path.GetFileName(imageToProcess.FilePath),
-                            ProcessedData = processedImage
-                        };
-                        processedImagesQueue.Add(ResultForQue);
-                    }
-                });
-                workerAgents.Add(worker);
+                Interlocked.CompareExchange(ref failure, ex, null);
+                cancellation.Cancel();
             }
-
-            var allWorkersTask = Task.WhenAll(workerAgents).ContinueWith(t =>
+        }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        var reader = Start(() =>
+        {
+            try
             {
-                processedImagesQueue.CompleteAdding();
-            });
-
-
-            var writerAgent = Task.Run(() =>
-            {
-
-                foreach (var result in processedImagesQueue.GetConsumingEnumerable())
+                foreach (var file in files)
                 {
-                    string savePath = Path.Combine(outputDir, result.OriginalFileName);
-                    ImageIO.SaveImage(result.ProcessedData, savePath);
+                    slots.Wait(token);
+                    input.Add(new ImageToProcess { FilePath = file, ImageData = ImageIO.LoadAsGrayscale(file) }, token);
                 }
-            });
-
-            Task.WaitAll(readerAgent, allWorkersTask, writerAgent);
-
-            stopwatch.Stop();
-            Console.WriteLine($"\nОбработка конвейером завершена за {stopwatch.ElapsedMilliseconds} мс.");
-        }
+            }
+            finally { input.CompleteAdding(); }
+        });
+        var workers = Enumerable.Range(0, workerCount).Select(_ => Start(() =>
+        {
+            foreach (var item in input.GetConsumingEnumerable(token))
+            {
+                var result = new ImageResult
+                {
+                    OriginalFileName = Path.GetFileName(item.FilePath),
+                    ProcessedData = ConvolutionProcessor.Convolve(item.ImageData, Kernels.BlurBox)
+                };
+                item.ImageData = new double[0, 0];
+                output.Add(result, token);
+            }
+        })).ToArray();
+        var completion = Task.WhenAll(workers).ContinueWith(_ => output.CompleteAdding(), TaskScheduler.Default);
+        var writer = Start(() =>
+        {
+            foreach (var result in output.GetConsumingEnumerable(token))
+            {
+                ImageIO.SaveImage(result.ProcessedData, Path.Combine(outputDir, result.OriginalFileName));
+                result.ProcessedData = new double[0, 0];
+                slots.Release();
+            }
+        });
+        Task.WaitAll(reader, completion, writer);
+        if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
+        Console.WriteLine($"Обработка конвейером ({workerCount} агентов): {files.Length} файлов за {stopwatch.Elapsed.TotalMilliseconds:F1} мс.");
     }
 }

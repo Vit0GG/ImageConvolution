@@ -489,3 +489,5 @@ ImageConvolution/Agent_Processed_Output/
 ImageConvolution/Processed_Output_Par/
 ImageConvolution/Processed_Output_Seq/
 ImageConvolution/Processed_Output_*/
+repomix-output.*
+repomix-output.xml

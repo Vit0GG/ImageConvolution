@@ -5,6 +5,8 @@ using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Threading.Tasks;
 
+using BenchmarkDotNet.Running;
+
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 
@@ -22,6 +24,9 @@ namespace ImageConvolution
         static void Main(string[] args)
         {
 
+#if DEBUG
+            Console.WriteLine("Сборка DEBUG. Для замеров используйте: dotnet run -c Release");
+#endif
             Console.WriteLine("=== Программа свёртки изображений ===");
             Console.WriteLine("1. Обработать один файл");
             Console.WriteLine("2. Обработать набор файлов");
@@ -30,6 +35,7 @@ namespace ImageConvolution
             Console.WriteLine("5. Обработать файл на GPU");
             Console.WriteLine("6. Создать 4K тестовые изображения");
             Console.WriteLine("7. Unified обработка (CPU + GPU)");
+            Console.WriteLine("8. Запустить BenchmarkDotNet");
 
             string? choice = Console.ReadLine();
 
@@ -72,37 +78,54 @@ namespace ImageConvolution
                 ImageIO.SaveImage(res, finalOutputPath);
                 Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{finalOutputPath}");
             }
-            else if (choice == "2")
+           else if (choice == "2")
             {
                 Console.WriteLine("Введите исходный путь к папке или перетащите её");
                 string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
-
+                
                 if (string.IsNullOrEmpty(inputDir)) return;
-
-                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir) ?? "", "Processed_Output");
-
+                
+                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir) ?? "", 
+                    "Processed_Output");
+                
                 Console.WriteLine("Прогрев...");
-                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Warmup", false);
-
-                Console.WriteLine("\n--- ТЕСТ 1: Только внешний параллелизм (последовательная свёртка) ---");
+                BatchProcessor.ProcessImagesNaiveParallel(
+                    inputDir, outputDir + "_Warmup", ParallelStrategy.Sequential);
+                
+                Console.WriteLine("\n--- ТЕСТ 1: Последовательная свёртка ---");
                 var times1 = MeasureMultipleRuns(() =>
                 {
-                    BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Seq", false);
+                    BatchProcessor.ProcessImagesNaiveParallel(
+                        inputDir, outputDir + "_Seq", ParallelStrategy.Sequential);
                 }, 3);
-
+                
                 Console.WriteLine($"  Среднее: {times1.Average():F1} мс");
                 Console.WriteLine($"  Медиана: {CalculateMedian(times1):F1} мс");
                 Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times1):F1} мс");
-
-                Console.WriteLine("\n--- ТЕСТ 2: Вложенный параллелизм (параллельная свёртка) ---");
+                
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_WarmupRows", ParallelStrategy.ParallelByRows);
+                Console.WriteLine("\n--- ТЕСТ 2: Параллелизм по СТРОКАМ (Y) ---");
                 var times2 = MeasureMultipleRuns(() =>
                 {
-                    BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_Par", true);
+                    BatchProcessor.ProcessImagesNaiveParallel(
+                        inputDir, outputDir + "_ParRows", ParallelStrategy.ParallelByRows);
                 }, 3);
-
+                
                 Console.WriteLine($"  Среднее: {times2.Average():F1} мс");
                 Console.WriteLine($"  Медиана: {CalculateMedian(times2):F1} мс");
                 Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times2):F1} мс");
+                
+                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_WarmupCols", ParallelStrategy.ParallelByColumns);
+                Console.WriteLine("\n--- ТЕСТ 3: Параллелизм по СТОЛБЦАМ (X) ---");
+                var times3 = MeasureMultipleRuns(() =>
+                {
+                    BatchProcessor.ProcessImagesNaiveParallel(
+                        inputDir, outputDir + "_ParCols", ParallelStrategy.ParallelByColumns);
+                }, 3);
+                
+                Console.WriteLine($"  Среднее: {times3.Average():F1} мс");
+                Console.WriteLine($"  Медиана: {CalculateMedian(times3):F1} мс");
+                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times3):F1} мс");
             }
             else if (choice == "3")
             {
@@ -111,7 +134,7 @@ namespace ImageConvolution
                 if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
 
                 Console.Write("Введите количество агентов для свёртки (от количества ядер на устройстве): ");
-                if (!int.TryParse(Console.ReadLine(), out int workerCount))
+                if (!int.TryParse(Console.ReadLine(), out int workerCount) || workerCount <= 0)
                 {
                     workerCount = Environment.ProcessorCount;
                 }
@@ -141,12 +164,7 @@ namespace ImageConvolution
 
                 double ms = MeasureMedianMs(() =>
                 {
-                    if (Directory.Exists(outputDir))
-                    {
-                        Directory.Delete(outputDir, true);
-                    }
-
-                    LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
+LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
                 });
 
                 Console.WriteLine($"ImageSharp blur (median): {ms:F3} ms");
@@ -188,16 +206,27 @@ namespace ImageConvolution
                 }
                 else if (Directory.Exists(path))
                 {
-                    Console.WriteLine("\nРежим: пакетная обработка папки на GPU.");
+                    Console.WriteLine("\nРежим: пакетная обработка на GPU.");
                     string outputDir = Path.Combine(Path.GetDirectoryName(path)!, "GPU_Batch_Output");
 
-                    GpuConvolutionProcessor.ProcessDirectory(path, outputDir, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+                    Console.WriteLine("Прогрев GPU...");
+                    GpuConvolutionProcessor.ProcessDirectory(path, outputDir + "_Warmup", Kernels.BlurBoxFloat, EdgeStrategy.Extend, false);
+
+                    Console.WriteLine("\n--- Замер пакетной обработки на GPU ---");
+                    var times = MeasureMultipleRuns(() =>
+                    {
+                        GpuConvolutionProcessor.ProcessDirectory(path, outputDir, Kernels.BlurBoxFloat, EdgeStrategy.Extend, false);
+                    }, 3);
+
+                    Console.WriteLine($"\n  Среднее: {times.Average():F1} мс");
+                    Console.WriteLine($"  Медиана: {CalculateMedian(times):F1} мс");
+                    Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times):F1} мс");
                 }
             }
 
             else if (choice == "6")
             {
-                string outputDir = @"C:\Test4K";
+                string outputDir = Path.Combine(Environment.CurrentDirectory, "Test4K");
                 Directory.CreateDirectory(outputDir);
 
                 int count = 100;
@@ -227,11 +256,11 @@ namespace ImageConvolution
 
                 Console.Write("CPU воркеров (Enter для auto): ");
                 string? cpuInput = Console.ReadLine();
-                int cpuWorkers = string.IsNullOrEmpty(cpuInput) ? Environment.ProcessorCount / 2 : int.Parse(cpuInput);
+                int cpuWorkers = string.IsNullOrEmpty(cpuInput) ? Math.Max(1, Environment.ProcessorCount / 2) : int.TryParse(cpuInput, out int cpuValue) && cpuValue >= 0 ? cpuValue : throw new ArgumentException("Некорректное число CPU агентов");
 
                 Console.Write("GPU воркеров (Enter для 1): ");
                 string? gpuInput = Console.ReadLine();
-                int gpuWorkers = string.IsNullOrEmpty(gpuInput) ? 1 : int.Parse(gpuInput);
+                int gpuWorkers = string.IsNullOrEmpty(gpuInput) ? 1 : int.TryParse(gpuInput, out int gpuValue) && gpuValue >= 0 ? gpuValue : throw new ArgumentException("Некорректное число GPU агентов");
 
                 string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Unified_Output");
 
@@ -239,8 +268,8 @@ namespace ImageConvolution
                 {
                     CpuWorkers = cpuWorkers,
                     GpuWorkers = gpuWorkers,
-                    ReaderThreads = 2,
-                    WriterThreads = 2,
+                    ReaderThreads = 1,
+                    WriterThreads = 1,
                     Kernel = Kernels.BlurBoxFloat,
                     Strategy = EdgeStrategy.Extend
                 };
@@ -257,6 +286,11 @@ namespace ImageConvolution
                     processor.ProcessDirectory(inputDir, outputDir);
                 }
             }
+            else if (choice == "8")
+            {
+                Console.WriteLine("Внимание: BenchmarkDotNet требует сборки в режиме Release, иначе результаты будут с предупреждением.");
+                BenchmarkRunner.Run<ConvolutionBenchmarks>();
+            }
             else
             {
                 Console.WriteLine("Неверный выбор.");
@@ -265,43 +299,8 @@ namespace ImageConvolution
         }
         static double MeasureMedianMs(Action action, int warmupRuns = 2, int measuredRuns = 5)
         {
-            var currentProcess = Process.GetCurrentProcess();
-            var oldPriority = currentProcess.PriorityClass;
-
-            try
-            {
-                currentProcess.PriorityClass = ProcessPriorityClass.High;
-
-                for (int i = 0; i < warmupRuns; i++)
-                {
-                    action();
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
-                }
-
-                var times = new List<double>();
-
-                for (int i = 0; i < measuredRuns; i++)
-                {
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                    GC.Collect();
-
-                    long startTimestamp = Stopwatch.GetTimestamp();
-                    action();
-                    long endTimestamp = Stopwatch.GetTimestamp();
-
-                    double elapsedMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
-                    times.Add(elapsedMs);
-                }
-
-                return CalculateMedian(times);
-            }
-            finally
-            {
-                currentProcess.PriorityClass = oldPriority;
-            }
+            for (int i = 0; i < warmupRuns; i++) action();
+            return CalculateMedian(MeasureMultipleRuns(action, measuredRuns));
         }
         static List<double> MeasureMultipleRuns(Action action, int runs)
         {
@@ -309,9 +308,6 @@ namespace ImageConvolution
 
             for (int i = 0; i < runs; i++)
             {
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-                GC.Collect();
 
                 long startTimestamp = Stopwatch.GetTimestamp();
                 action();
@@ -351,78 +347,135 @@ namespace ImageConvolution
 
     public class ImageIO
     {
-        public static double[,] LoadAsGrayscale(string path)
+        public static byte ToByte(double value) => !(value > 0) ? (byte)0 : value >= 255 ? (byte)255 : (byte)(value + 0.5);
+
+
+        public static byte[,] LoadAsGrayscaleByte(string path)
         {
             using Image<Rgba32> image = Image.Load<Rgba32>(path);
-            int width = image.Width;
-            int height = image.Height;
-            double[,] result = new double[height, width];
-
-            for (int y = 0; y < height; y++)
+            byte[,] result = new byte[image.Height, image.Width];
+            image.ProcessPixelRows(accessor =>
             {
-                for (int x = 0; x < width; x++)
+                for (int y = 0; y < image.Height; y++)
                 {
-                    Rgba32 pixel = image[x, y];
-                    double gray = 0.299 * pixel.R + 0.587 * pixel.G + 0.114 * pixel.B;
-                    result[y, x] = gray;
+                    var row = accessor.GetRowSpan(y);
+                    for (int x = 0; x < image.Width; x++)
+                        result[y, x] = ToByte(0.299 * row[x].R + 0.587 * row[x].G + 0.114 * row[x].B);
                 }
-            }
+            });
             return result;
         }
-        public static void SaveImage(double[,] data, string path)
-        {
-            int height = data.GetLength(0);
-            int width = data.GetLength(1);
 
-            using Image<Rgba32> image = new Image<Rgba32>(width, height);
+    public static void SaveImageByte(byte[,] data, string path)
+    {
+        int height = data.GetLength(0);
+        int width = data.GetLength(1);
+        
+        using Image<L8> image = new Image<L8>(width, height);
+
+        image.ProcessPixelRows(accessor =>
+        {
             for (int y = 0; y < height; y++)
             {
+                Span<L8> pixelRow = accessor.GetRowSpan(y);
+                for (int x = 0; x < width; x++)
+                {
+                    pixelRow[x] = new L8(data[y, x]);
+                }
+            }
+        });
+        
+        image.Save(path);
+    }
+
+    public static double[,] LoadAsGrayscale(string path)
+    {
+        using Image<Rgba32> image = Image.Load<Rgba32>(path);
+        int width = image.Width;
+        int height = image.Height;
+        double[,] result = new double[height, width];
+
+        image.ProcessPixelRows(accessor =>
+        {
+            for (int y = 0; y < height; y++)
+            {
+                Span<Rgba32> pixelRow = accessor.GetRowSpan(y);
+                for (int x = 0; x < width; x++)
+                {
+                    ref Rgba32 pixel = ref pixelRow[x];
+                    result[y, x] = 0.299 * pixel.R + 0.587 * pixel.G + 0.114 * pixel.B;
+                }
+            }
+        });
+        return result;
+    }
+
+    public static void SaveImage(double[,] data, string path)
+    {
+        int height = data.GetLength(0);
+        int width = data.GetLength(1);
+        using Image<L8> image = new Image<L8>(width, height);
+
+        image.ProcessPixelRows(accessor =>
+        {
+            for (int y = 0; y < height; y++)
+            {
+                Span<L8> pixelRow = accessor.GetRowSpan(y);
                 for (int x = 0; x < width; x++)
                 {
                     double val = data[y, x];
-                    byte gray = (byte)Math.Clamp(val, 0, 255);
-                    image[x, y] = new Rgba32(gray, gray, gray);
+                    byte gray = ToByte(val);
+                    pixelRow[x] = new L8(gray);
                 }
             }
-            image.Save(path);
-        }
-        public static float[,] LoadAsGrayscaleFloat(string path)
-        {
-            using Image<Rgba32> image = Image.Load<Rgba32>(path);
-            int width = image.Width;
-            int height = image.Height;
-            float[,] result = new float[height, width];
+        });
+        image.Save(path);
+    }
 
+    public static float[,] LoadAsGrayscaleFloat(string path)
+    {
+        using Image<Rgba32> image = Image.Load<Rgba32>(path);
+        int width = image.Width;
+        int height = image.Height;
+        float[,] result = new float[height, width];
+
+        image.ProcessPixelRows(accessor =>
+        {
             for (int y = 0; y < height; y++)
             {
+                Span<Rgba32> pixelRow = accessor.GetRowSpan(y);
                 for (int x = 0; x < width; x++)
                 {
-                    Rgba32 pixel = image[x, y];
-                    float gray = 0.299f * pixel.R + 0.587f * pixel.G + 0.114f * pixel.B;
-                    result[y, x] = gray;
+                    ref Rgba32 pixel = ref pixelRow[x];
+                    result[y, x] = (float)(0.299 * pixel.R + 0.587 * pixel.G + 0.114 * pixel.B);
                 }
             }
-            return result;
-        }
+        });
+        return result;
+    }
 
-        public static void SaveImageFloat(float[,] data, string path)
+    public static void SaveImageFloat(float[,] data, string path)
+    {
+        int height = data.GetLength(0);
+        int width = data.GetLength(1);
+        using Image<L8> image = new Image<L8>(width, height);
+
+        image.ProcessPixelRows(accessor =>
         {
-            int height = data.GetLength(0);
-            int width = data.GetLength(1);
-
-            using Image<Rgba32> image = new Image<Rgba32>(width, height);
             for (int y = 0; y < height; y++)
             {
+                Span<L8> pixelRow = accessor.GetRowSpan(y);
                 for (int x = 0; x < width; x++)
                 {
                     float val = data[y, x];
-                    byte gray = (byte)Math.Clamp(val, 0, 255);
-                    image[x, y] = new Rgba32(gray, gray, gray);
+                    byte gray = ToByte(val);
+                    pixelRow[x] = new L8(gray);
                 }
             }
-            image.Save(path);
-        }
+        });
+        image.Save(path);
     }
+}
 
     public class Kernels
     {
@@ -480,8 +533,8 @@ namespace ImageConvolution
             {
                 for (int kx = 0; kx < kwidth; kx++)
                 {
-                    int pixelY = y + ky - offsetY;
-                    int pixelX = x + kx - offsetX;
+                    int pixelY = y + offsetY - ky;
+                    int pixelX = x + offsetX - kx;
                     double pixelValue = 0.0;
 
                     if (strategy == EdgeStrategy.Extend)
@@ -505,36 +558,21 @@ namespace ImageConvolution
 
         public static double[,] Convolve(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
         {
-            int imgheight = image.GetLength(0);
-            int imgwidth = image.GetLength(1);
-            double[,] result = new double[imgheight, imgwidth];
-            for (int y = 0; y < imgheight; y++)
-            {
-                for (int x = 0; x < imgwidth; x++)
-                {
-                    result[y, x] = CalculatePixelValue(image, kernel, x, y, strategy);
-                }
-            }
-            return result;
+            return ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.Sequential);
         }
     }
     public class ParallelConvolutionProcessor
     {
 
-        public static double[,] ConvolveParallel(double[,] image, double[,] kernal, EdgeStrategy strategy = EdgeStrategy.Extend)
+        public static double[,] ConvolveParallel(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
         {
-            int imgheight = image.GetLength(0);
-            int imgwidth = image.GetLength(1);
-            double[,] result = new double[imgheight, imgwidth];
-
-            Parallel.For(0, imgheight, y =>
-            {
-                for (int x = 0; x < imgwidth; x++)
-                {
-                    result[y, x] = ConvolutionProcessor.CalculatePixelValue(image, kernal, x, y, strategy);
-                }
-            });
-            return result;
+            return ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.ParallelByRows);
         }
+
+        public static double[,] ConvolveParallelByColumns(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
+        {
+            return ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.ParallelByColumns);
+        }
+
     }
 }

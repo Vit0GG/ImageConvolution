@@ -1,24 +1,22 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace ImageConvolution
 {
-    public enum ProcessorType
-    {
-        CPU,
-        GPU
-    }
+    public enum ProcessorType { CPU, GPU }
 
     public class ProcessingTask
     {
         public required string InputPath { get; set; }
         public required string OutputPath { get; set; }
-        public required float[,] ImageData { get; set; }
+        public required float[,] ImageData { get; set; } 
     }
 
     public class ProcessingResult
@@ -30,10 +28,13 @@ namespace ImageConvolution
 
     public class UnifiedProcessorConfig
     {
-        public int CpuWorkers { get; set; } = Environment.ProcessorCount / 2;
+        public int CpuWorkers { get; set; } = Math.Max(1, Environment.ProcessorCount / 2);
         public int GpuWorkers { get; set; } = 1;
-        public int ReaderThreads { get; set; } = 2;
-        public int WriterThreads { get; set; } = 2;
+        public int ReaderThreads { get; set; } = 1; 
+        public int WriterThreads { get; set; } = 1; 
+        public int QueueCapacity { get; set; } = 4;
+        public long MemoryBudgetBytes { get; set; } = 0;
+        public ParallelStrategy CpuStrategy { get; set; } = ParallelStrategy.Sequential;
         public float[,] Kernel { get; set; } = Kernels.BlurBoxFloat;
         public EdgeStrategy Strategy { get; set; } = EdgeStrategy.Extend;
     }
@@ -41,297 +42,148 @@ namespace ImageConvolution
     public class UnifiedProcessor : IDisposable
     {
         private readonly UnifiedProcessorConfig config;
-        private readonly BlockingCollection<ProcessingTask> readQueue;
-        private readonly BlockingCollection<ProcessingResult> writeQueue;
-        private readonly GpuConvolutionProcessor[] gpuProcessors;
-        private readonly CancellationTokenSource cts;
+        private readonly object sync = new();
+        private bool disposed;
 
         public UnifiedProcessor(UnifiedProcessorConfig config)
         {
-            this.config = config;
-            readQueue = new BlockingCollection<ProcessingTask>(boundedCapacity: 20);
-            writeQueue = new BlockingCollection<ProcessingResult>(boundedCapacity: 20);
-            cts = new CancellationTokenSource();
-
-            gpuProcessors = new GpuConvolutionProcessor[config.GpuWorkers];
-            for (int i = 0; i < config.GpuWorkers; i++)
+            ArgumentNullException.ThrowIfNull(config);
+            if (config.CpuWorkers < 0 || config.GpuWorkers < 0 || (config.CpuWorkers == 0 && config.GpuWorkers == 0))
+                throw new ArgumentException("Нужен хотя бы один вычислитель", nameof(config));
+            if (config.ReaderThreads <= 0 || config.WriterThreads <= 0 || config.QueueCapacity <= 0 || config.MemoryBudgetBytes < 0)
+                throw new ArgumentException("Нужны положительные количества читателей, писателей и мест в очереди; бюджет памяти: 0 (авто) или положительное число", nameof(config));
+            ConvolutionValidation.ValidateKernel(config.Kernel, config.Strategy);
+            if (!Enum.IsDefined(config.CpuStrategy)) throw new ArgumentOutOfRangeException(nameof(config));
+            this.config = new UnifiedProcessorConfig
             {
-                gpuProcessors[i] = new GpuConvolutionProcessor();
-            }
+                CpuWorkers = config.CpuWorkers, GpuWorkers = config.GpuWorkers,
+                ReaderThreads = config.ReaderThreads, WriterThreads = config.WriterThreads,
+                QueueCapacity = config.QueueCapacity, MemoryBudgetBytes = config.MemoryBudgetBytes,
+                Kernel = (float[,])config.Kernel.Clone(), Strategy = config.Strategy, CpuStrategy = config.CpuStrategy
+            };
         }
 
         public void ProcessDirectory(string inputDirectory, string outputDirectory)
         {
-            if (!Directory.Exists(inputDirectory))
+            lock (sync)
             {
-                Console.WriteLine("Ошибка: папка не существует");
-                return;
+                ObjectDisposedException.ThrowIf(disposed, this);
+                ProcessDirectoryAsync(inputDirectory, outputDirectory).GetAwaiter().GetResult();
             }
+        }
 
+        private async Task ProcessDirectoryAsync(string inputDirectory, string outputDirectory)
+        {
+            if (!Directory.Exists(inputDirectory)) return;
+            ImageFiles.ValidateDirectories(inputDirectory, outputDirectory);
             Directory.CreateDirectory(outputDirectory);
-
-            string[] files = Directory.GetFiles(inputDirectory, "*.jpg").OrderBy(f => f).ToArray();
-            if (files.Length == 0)
+            var timer = Stopwatch.StartNew();
+            var files = ImageFiles.GetFiles(inputDirectory);
+            if (files.Length == 0) return;
+            int deviceCount = config.GpuWorkers > 0 ? GpuConvolutionProcessor.GetDeviceCount() : 0;
+            if (config.GpuWorkers > 0 && deviceCount == 0)
+                throw new InvalidOperationException("Запрошены GPU агенты, но CUDA устройства не найдены");
+            using var slots = new SemaphoreSlim(ImageFiles.GetInFlightLimit(files, config.MemoryBudgetBytes, 8));
+            using var cancellation = new CancellationTokenSource();
+            var token = cancellation.Token;
+            var inputChannel = Channel.CreateBounded<ProcessingTask>(config.QueueCapacity);
+            var outputChannel = Channel.CreateBounded<ProcessingResult>(config.QueueCapacity);
+            var filesQueue = new ConcurrentQueue<string>(files);
+            Exception? failure = null;
+            int processedCount = 0, cpuCount = 0, gpuCount = 0;
+            Task Start(Func<Task> action) => Task.Run(async () =>
             {
-                Console.WriteLine("Файлы .jpg не найдены");
-                return;
-            }
-
-            Console.WriteLine($"\n=== Unified Processing ===");
-            Console.WriteLine($"Файлов: {files.Length}");
-            Console.WriteLine($"CPU воркеров: {config.CpuWorkers}");
-            Console.WriteLine($"GPU воркеров: {config.GpuWorkers}");
-            Console.WriteLine($"Читателей: {config.ReaderThreads}");
-            Console.WriteLine($"Писателей: {config.WriterThreads}");
-
-            var totalStopwatch = Stopwatch.StartNew();
-            int processedCount = 0;
-            int cpuCount = 0;
-            int gpuCount = 0;
-            object statsLock = new object();
-
-            var readers = new Task[config.ReaderThreads];
-            for (int i = 0; i < config.ReaderThreads; i++)
-            {
-                int threadId = i;
-                readers[i] = Task.Run(() => ReaderAgent(files, outputDirectory, threadId));
-            }
-
-            var cpuWorkers = new Task[config.CpuWorkers];
-            for (int i = 0; i < config.CpuWorkers; i++)
-            {
-                int workerId = i;
-                cpuWorkers[i] = Task.Run(() => CpuWorkerAgent(workerId, ref cpuCount, statsLock));
-            }
-
-            var gpuWorkers = new Task[config.GpuWorkers];
-            for (int i = 0; i < config.GpuWorkers; i++)
-            {
-                int workerId = i;
-                gpuWorkers[i] = Task.Run(() => GpuWorkerAgent(workerId, ref gpuCount, statsLock));
-            }
-
-            var writers = new Task[config.WriterThreads];
-            for (int i = 0; i < config.WriterThreads; i++)
-            {
-                int threadId = i;
-                writers[i] = Task.Run(() => WriterAgent(threadId, ref processedCount, files.Length));
-            }
-
-            Task.WaitAll(readers);
-            readQueue.CompleteAdding();
-
-            Task.WaitAll(cpuWorkers.Concat(gpuWorkers).ToArray());
-            writeQueue.CompleteAdding();
-
-            Task.WaitAll(writers);
-
-            totalStopwatch.Stop();
-
-            Console.WriteLine($"\n\n=== Результаты ===");
-            Console.WriteLine($"Обработано файлов: {processedCount}");
-            Console.WriteLine($"  CPU обработал: {cpuCount}");
-            Console.WriteLine($"  GPU обработал: {gpuCount}");
-            Console.WriteLine($"Общее время: {totalStopwatch.ElapsedMilliseconds} мс");
-            Console.WriteLine($"Среднее время на файл: {totalStopwatch.ElapsedMilliseconds / (double)files.Length:F2} мс");
-        }
-
-        private void ReaderAgent(string[] files, string outputDirectory, int threadId)
-        {
-            int filesPerThread = (int)Math.Ceiling(files.Length / (double)config.ReaderThreads);
-            int startIdx = threadId * filesPerThread;
-            int endIdx = Math.Min(startIdx + filesPerThread, files.Length);
-
-            for (int i = startIdx; i < endIdx; i++)
-            {
-                if (cts.Token.IsCancellationRequested) break;
-
-                try
-                {
-                    string inputPath = files[i];
-                    float[,] imageData = ImageIO.LoadAsGrayscaleFloat(inputPath);
-                    string fileName = Path.GetFileName(inputPath);
-                    string outputPath = Path.Combine(outputDirectory, fileName);
-
-                    var task = new ProcessingTask
-                    {
-                        InputPath = inputPath,
-                        OutputPath = outputPath,
-                        ImageData = imageData
-                    };
-
-                    readQueue.Add(task, cts.Token);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                try { await action(); }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"\nОшибка чтения {files[i]}: {ex.Message}");
-                }
-            }
-        }
-
-        private void CpuWorkerAgent(int workerId, ref int counter, object lockObj)
-        {
-            foreach (var task in readQueue.GetConsumingEnumerable(cts.Token))
-            {
-                try
-                {
-                    float[,] result = ConvolveCpu(task.ImageData, config.Kernel, config.Strategy);
-
-                    var processingResult = new ProcessingResult
-                    {
-                        OutputPath = task.OutputPath,
-                        ResultData = result,
-                        ProcessedBy = ProcessorType.CPU
-                    };
-
-                    writeQueue.Add(processingResult, cts.Token);
-
-                    lock (lockObj)
-                    {
-                        counter++;
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"\nОшибка CPU обработки: {ex.Message}");
-                }
-            }
-        }
-
-        private void GpuWorkerAgent(int workerId, ref int counter, object lockObj)
-        {
-            var gpuProcessor = gpuProcessors[workerId];
-
-            foreach (var task in readQueue.GetConsumingEnumerable(cts.Token))
-            {
-                try
-                {
-                    float[,] result = gpuProcessor.ConvolveGpu(task.ImageData, config.Kernel, config.Strategy);
-
-                    var processingResult = new ProcessingResult
-                    {
-                        OutputPath = task.OutputPath,
-                        ResultData = result,
-                        ProcessedBy = ProcessorType.GPU
-                    };
-
-                    writeQueue.Add(processingResult, cts.Token);
-
-                    lock (lockObj)
-                    {
-                        counter++;
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"\nОшибка GPU обработки: {ex.Message}");
-                }
-            }
-        }
-
-        private void WriterAgent(int threadId, ref int counter, int total)
-        {
-            foreach (var result in writeQueue.GetConsumingEnumerable(cts.Token))
-            {
-                try
-                {
-                    ImageIO.SaveImageFloat(result.ResultData, result.OutputPath);
-
-                    int current = Interlocked.Increment(ref counter);
-                    Console.Write($"\rОбработано: {current}/{total} (последний: {result.ProcessedBy})   ");
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"\nОшибка записи {result.OutputPath}: {ex.Message}");
-                }
-            }
-        }
-
-        private float[,] ConvolveCpu(float[,] image, float[,] kernel, EdgeStrategy strategy)
-        {
-            int height = image.GetLength(0);
-            int width = image.GetLength(1);
-            int kHeight = kernel.GetLength(0);
-            int kWidth = kernel.GetLength(1);
-            int offsetY = kHeight / 2;
-            int offsetX = kWidth / 2;
-
-            float[,] result = new float[height, width];
-
-            Parallel.For(0, height, y =>
-            {
-                for (int x = 0; x < width; x++)
-                {
-                    float sum = 0.0f;
-
-                    for (int ky = 0; ky < kHeight; ky++)
-                    {
-                        for (int kx = 0; kx < kWidth; kx++)
-                        {
-                            int pixelY = y + ky - offsetY;
-                            int pixelX = x + kx - offsetX;
-                            float val = 0.0f;
-
-                            if (strategy == EdgeStrategy.Extend)
-                            {
-                                pixelY = Math.Clamp(pixelY, 0, height - 1);
-                                pixelX = Math.Clamp(pixelX, 0, width - 1);
-                                val = image[pixelY, pixelX];
-                            }
-                            else if (strategy == EdgeStrategy.ZeroPadding)
-                            {
-                                if (pixelY >= 0 && pixelY < height && pixelX >= 0 && pixelX < width)
-                                {
-                                    val = image[pixelY, pixelX];
-                                }
-                            }
-
-                            sum += val * kernel[ky, kx];
-                        }
-                    }
-
-                    result[y, x] = sum;
+                    Interlocked.CompareExchange(ref failure, ex, null);
+                    cancellation.Cancel();
                 }
             });
+            async Task Complete(Task[] tasks, Action complete)
+            {
+                try { await Task.WhenAll(tasks); }
+                finally { complete(); }
+            }
+            var readers = Enumerable.Range(0, config.ReaderThreads).Select(_ => Start(async () =>
+            {
+                while (filesQueue.TryDequeue(out var file))
+                {
+                    await slots.WaitAsync(token);
+                    var data = ImageIO.LoadAsGrayscaleFloat(file);
+                    await inputChannel.Writer.WriteAsync(new ProcessingTask
+                    {
+                        InputPath = file, OutputPath = Path.Combine(outputDirectory, Path.GetFileName(file)), ImageData = data
+                    }, token);
+                    data = null!;
+                }
+            })).ToArray();
+            var readerCompletion = Complete(readers, () => inputChannel.Writer.TryComplete());
+            var workers = new List<Task>();
+            for (int i = 0; i < config.GpuWorkers; i++)
+            {
+                int deviceIndex = i % deviceCount;
+                workers.Add(Start(async () =>
+                {
+                    using var gpu = new GpuConvolutionProcessor(deviceIndex);
+                    Console.WriteLine($"GPU агент: устройство {deviceIndex}, {gpu.accelerator.Name}");
+                    await foreach (var item in inputChannel.Reader.ReadAllAsync(token))
+                    {
+                        var result = gpu.ConvolveGpu(item.ImageData, config.Kernel, config.Strategy);
+                        item.ImageData = new float[0, 0];
+                        await outputChannel.Writer.WriteAsync(new ProcessingResult
+                        {
+                            OutputPath = item.OutputPath, ResultData = result, ProcessedBy = ProcessorType.GPU
+                        }, token);
+                        result = null!;
+                    }
+                }));
+            }
+            for (int i = 0; i < config.CpuWorkers; i++)
+                workers.Add(Start(async () =>
+                {
+                    await foreach (var item in inputChannel.Reader.ReadAllAsync(token))
+                    {
+                        var result = ConvolveCpu(item.ImageData, config.Kernel, config.Strategy, config.CpuStrategy);
+                        item.ImageData = new float[0, 0];
+                        await outputChannel.Writer.WriteAsync(new ProcessingResult
+                        {
+                            OutputPath = item.OutputPath, ResultData = result, ProcessedBy = ProcessorType.CPU
+                        }, token);
+                        result = null!;
+                    }
+                }));
+            var workerCompletion = Complete(workers.ToArray(), () => outputChannel.Writer.TryComplete());
+            var writers = Enumerable.Range(0, config.WriterThreads).Select(_ => Start(async () =>
+            {
+                await foreach (var result in outputChannel.Reader.ReadAllAsync(token))
+                {
+                    ImageIO.SaveImageFloat(result.ResultData, result.OutputPath);
+                    result.ResultData = new float[0, 0];
+                    Interlocked.Increment(ref processedCount);
+                    if (result.ProcessedBy == ProcessorType.CPU) Interlocked.Increment(ref cpuCount);
+                    else Interlocked.Increment(ref gpuCount);
+                    slots.Release();
+                }
+            })).ToArray();
+            await Task.WhenAll(writers.Append(readerCompletion).Append(workerCompletion));
+            if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            Console.WriteLine($"Обработано {processedCount}/{files.Length}; CPU: {cpuCount}, GPU: {gpuCount}; {timer.Elapsed.TotalMilliseconds:F1} мс");
+        }
 
-            return result;
+        public static float[,] ConvolveCpu(float[,] image, float[,] kernel, EdgeStrategy strategy, ParallelStrategy parallelStrategy = ParallelStrategy.Sequential)
+        {
+            return ConvolutionCore.Convolve(image, kernel, strategy, parallelStrategy);
         }
 
         public void Dispose()
         {
-            if (!cts.IsCancellationRequested)
+            lock (sync)
             {
-                cts.Cancel();
+                disposed = true;
+                GC.SuppressFinalize(this);
             }
-
-            readQueue?.Dispose();
-            writeQueue?.Dispose();
-
-            if (gpuProcessors != null)
-            {
-                foreach (var gpu in gpuProcessors)
-                {
-                    gpu?.Dispose();
-                }
-            }
-
-            cts?.Dispose();
         }
     }
 }
