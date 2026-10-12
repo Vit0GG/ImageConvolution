@@ -7,29 +7,46 @@ namespace ImageConvolution;
 public class ImageToProcess
 {
     public string FilePath { get; set; } = "";
-    public double[,] ImageData { get; set; } = new double[0, 0];
+    public byte[,] ImageData { get; set; } = new byte[0, 0];
 }
 
 public class ImageResult
 {
     public string OriginalFileName { get; set; } = "";
-    public double[,] ProcessedData { get; set; } = new double[0, 0];
+    public byte[,] ProcessedData { get; set; } = new byte[0, 0];
 }
 
 public class AgentProcessor
 {
     public static void ProcessImagesWithAgents(string inputDir, string outputDir, int workerCount,
-        int queueCapacity = 4, long memoryBudgetBytes = 0)
+        int queueCapacity = 4, long memoryBudgetBytes = 0, int readerCount = 1, int writerCount = 1)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(workerCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
         ArgumentOutOfRangeException.ThrowIfNegative(memoryBudgetBytes);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(readerCount);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(writerCount);
         if (!Directory.Exists(inputDir)) return;
         ImageFiles.ValidateDirectories(inputDir, outputDir);
         Directory.CreateDirectory(outputDir);
         var stopwatch = Stopwatch.StartNew();
         var files = ImageFiles.GetFiles(inputDir);
-        using var slots = new SemaphoreSlim(ImageFiles.GetInFlightLimit(files, memoryBudgetBytes, 16));
+        int limit = PerformanceProfiler.Measure("setup.memory_limit", () => ImageFiles.GetInFlightLimit(files, memoryBudgetBytes, ImageFiles.EstimatedInFlightBytesPerPixel));
+        PerformanceProfiler.Set("pipeline", new
+        {
+            inputDir,
+            files = files.Length,
+            cpuWorkers = workerCount,
+            gpuWorkers = 0,
+            readers = readerCount,
+            writers = writerCount,
+            queueCapacity,
+            inFlightLimit = limit,
+            pixelType = "byte",
+            memoryBudgetBytes
+        });
+        var filesQueue = new ConcurrentQueue<string>(files);
+        using var slots = new SemaphoreSlim(limit);
         using var input = new BlockingCollection<ImageToProcess>(queueCapacity);
         using var output = new BlockingCollection<ImageResult>(queueCapacity);
         using var cancellation = new CancellationTokenSource();
@@ -45,43 +62,46 @@ public class AgentProcessor
                 cancellation.Cancel();
             }
         }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
-        var reader = Start(() =>
+        var readers = Enumerable.Range(0, readerCount).Select(_ => Start(() =>
         {
-            try
+            while (filesQueue.TryDequeue(out var file))
             {
-                foreach (var file in files)
+                using (PerformanceProfiler.Measure("reader.wait_slot")) slots.Wait(token);
+                var item = new ImageToProcess
                 {
-                    slots.Wait(token);
-                    input.Add(new ImageToProcess { FilePath = file, ImageData = ImageIO.LoadAsGrayscale(file) }, token);
-                }
+                    FilePath = file,
+                    ImageData = PerformanceProfiler.Measure("reader.load", () => ImageIO.LoadAsGrayscaleByte(file))
+                };
+                using (PerformanceProfiler.Measure("reader.enqueue")) input.Add(item, token);
             }
-            finally { input.CompleteAdding(); }
-        });
+        })).ToArray();
+        var readerCompletion = Task.WhenAll(readers).ContinueWith(_ => input.CompleteAdding(), TaskScheduler.Default);
         var workers = Enumerable.Range(0, workerCount).Select(_ => Start(() =>
         {
-            foreach (var item in input.GetConsumingEnumerable(token))
+            foreach (var item in PerformanceProfiler.Consume(input, "cpu.wait_input", token))
             {
                 var result = new ImageResult
                 {
                     OriginalFileName = Path.GetFileName(item.FilePath),
                     ProcessedData = ConvolutionProcessor.Convolve(item.ImageData, Kernels.BlurBox)
                 };
-                item.ImageData = new double[0, 0];
-                output.Add(result, token);
+                item.ImageData = new byte[0, 0];
+                using (PerformanceProfiler.Measure("cpu.enqueue_result")) output.Add(result, token);
             }
         })).ToArray();
         var completion = Task.WhenAll(workers).ContinueWith(_ => output.CompleteAdding(), TaskScheduler.Default);
-        var writer = Start(() =>
+        var writers = Enumerable.Range(0, writerCount).Select(_ => Start(() =>
         {
-            foreach (var result in output.GetConsumingEnumerable(token))
+            foreach (var result in PerformanceProfiler.Consume(output, "writer.wait_input", token))
             {
-                ImageIO.SaveImage(result.ProcessedData, Path.Combine(outputDir, result.OriginalFileName));
-                result.ProcessedData = new double[0, 0];
+                using (PerformanceProfiler.Measure("writer.save"))
+                    ImageIO.SaveImageByte(result.ProcessedData, Path.Combine(outputDir, result.OriginalFileName));
+                result.ProcessedData = new byte[0, 0];
                 slots.Release();
             }
-        });
-        Task.WaitAll(reader, completion, writer);
+        })).ToArray();
+        Task.WaitAll(writers.Append(readerCompletion).Append(completion).ToArray());
         if (failure != null) ExceptionDispatchInfo.Capture(failure).Throw();
-        Console.WriteLine($"Обработка конвейером ({workerCount} агентов): {files.Length} файлов за {stopwatch.Elapsed.TotalMilliseconds:F1} мс.");
+        Console.WriteLine($"Обработка конвейером ({workerCount} вычислителей, {readerCount} читателей, {writerCount} писателей): {files.Length} файлов за {stopwatch.Elapsed.TotalMilliseconds:F1} мс.");
     }
 }

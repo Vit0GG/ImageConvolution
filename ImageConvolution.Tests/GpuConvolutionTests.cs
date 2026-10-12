@@ -27,46 +27,65 @@ namespace ImageConvolution.Tests
             GC.SuppressFinalize(this);
         }
 
-        [Fact]
+        [CudaFact]
         public void GpuProcessor_CanBeConstructedAndDisposed()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
             Assert.NotNull(gpuProcessor);
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_ExtendStrategy_ProducesCorrectCenterPixel()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[5, 5];
+            var image = new byte[5, 5];
             for (int i = 0; i < 5; i++)
                 for (int j = 0; j < 5; j++)
-                    image[i, j] = 100f;
+                    image[i, j] = 100;
 
             var result = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
 
-            Assert.Equal(100, Math.Round(result[2, 2]));
+            Assert.Equal(100, result[2, 2]);
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_ZeroPaddingStrategy_AffectsCornerPixel()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[5, 5];
+            var image = new byte[5, 5];
             for (int i = 0; i < 5; i++)
                 for (int j = 0; j < 5; j++)
-                    image[i, j] = 100f;
+                    image[i, j] = 100;
 
             var result = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.ZeroPadding);
 
             Assert.True(result[0, 0] < 50);
         }
 
-        [Fact]
+        [CudaTheory]
+        [InlineData(EdgeStrategy.Extend)]
+        [InlineData(EdgeStrategy.ZeroPadding)]
+        public void ConvolveGpu_BytePixelsMatchCpu(EdgeStrategy edge)
+        {
+            var image = new byte[7, 9];
+            for (int y = 0; y < image.GetLength(0); y++)
+                for (int x = 0; x < image.GetLength(1); x++)
+                    image[y, x] = (byte)((y * 47 + x * 29) % 256);
+
+            var expected = ConvolutionProcessor.Convolve(image, Kernels.BlurBox, edge);
+            using var gpu = new GpuConvolutionProcessor();
+            var actual = gpu.ConvolveGpu(image, Kernels.BlurBox, edge);
+
+            for (int y = 0; y < image.GetLength(0); y++)
+                for (int x = 0; x < image.GetLength(1); x++)
+                    Assert.InRange(Math.Abs((int)actual[y, x] - expected[y, x]), 0, 1);
+        }
+
+        [CudaFact]
         public void ProcessDirectory_ProcessesFilesCorrectly()
         {
-            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test2.jpg", 10, 10);
 
             GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
 
@@ -76,18 +95,18 @@ namespace ImageConvolution.Tests
             Assert.True(File.Exists(Path.Combine(TestDirOutput, "test2.jpg")));
         }
 
-        [Fact]
-        public void ProcessDirectory_SkipsMismatchedSizeFiles()
+        [CudaFact]
+        public void ProcessDirectory_ProcessesDifferentSizeFiles()
         {
-            CreateTestImageFloat(TestDirInput, "test_10x10.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test_20x20.jpg", 20, 20);
+            CreateTestImageByte(TestDirInput, "test_10x10.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test_20x20.jpg", 20, 20);
 
             GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
 
             Assert.True(Directory.Exists(TestDirOutput));
-            Assert.Single(Directory.GetFiles(TestDirOutput));
+            Assert.Equal(2, Directory.GetFiles(TestDirOutput).Length);
             Assert.True(File.Exists(Path.Combine(TestDirOutput, "test_10x10.jpg")));
-            Assert.False(File.Exists(Path.Combine(TestDirOutput, "test_20x20.jpg")));
+            Assert.True(File.Exists(Path.Combine(TestDirOutput, "test_20x20.jpg")));
         }
 
         [Fact]
@@ -109,16 +128,16 @@ namespace ImageConvolution.Tests
             Assert.Empty(Directory.GetFiles(TestDirOutput));
         }
 
-        private void CreateTestImageFloat(string directory, string filename, int width, int height)
+        private void CreateTestImageByte(string directory, string filename, int width, int height)
         {
             Directory.CreateDirectory(directory);
-            var dummyPixelData = new float[height, width];
+            var dummyPixelData = new byte[height, width];
             for (int y = 0; y < height; y++)
                 for (int x = 0; x < width; x++)
-                    dummyPixelData[y, x] = 128f;
+                    dummyPixelData[y, x] = 128;
 
             string fullPath = Path.Combine(directory, filename);
-            ImageIO.SaveImageFloat(dummyPixelData, fullPath);
+            ImageIO.SaveImageByte(dummyPixelData, fullPath);
         }
         [Fact]
         public void UnifiedProcessor_CanBeConstructedAndDisposed()
@@ -138,8 +157,8 @@ namespace ImageConvolution.Tests
         [Fact]
         public void UnifiedProcessor_ProcessesDirectoryWithCpuOnly()
         {
-            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test2.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -156,11 +175,11 @@ namespace ImageConvolution.Tests
             Assert.Equal(2, Directory.GetFiles(TestDirOutput).Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void UnifiedProcessor_ProcessesDirectoryWithGpuOnly()
         {
-            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test2.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -177,12 +196,12 @@ namespace ImageConvolution.Tests
             Assert.Equal(2, Directory.GetFiles(TestDirOutput).Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void UnifiedProcessor_ProcessesDirectoryWithMixedWorkers()
         {
-            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test3.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test2.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test3.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -235,7 +254,7 @@ namespace ImageConvolution.Tests
         [Fact]
         public void UnifiedProcessor_UsesConfiguredKernel()
         {
-            CreateTestImageFloat(TestDirInput, "test.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test.jpg", 10, 10);
 
             var customKernel = new float[3, 3]
             {
@@ -260,7 +279,7 @@ namespace ImageConvolution.Tests
         [Fact]
         public void UnifiedProcessor_UsesConfiguredEdgeStrategy()
         {
-            CreateTestImageFloat(TestDirInput, "test.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -275,12 +294,12 @@ namespace ImageConvolution.Tests
             Assert.Single(Directory.GetFiles(TestDirOutput));
         }
 
-        [Fact]
+        [CudaFact]
         public void UnifiedProcessor_MultipleReadersAndWriters()
         {
             for (int i = 0; i < 5; i++)
             {
-                CreateTestImageFloat(TestDirInput, $"test{i}.jpg", 10, 10);
+                CreateTestImageByte(TestDirInput, $"test{i}.jpg", 10, 10);
             }
 
             var config = new UnifiedProcessorConfig
@@ -304,7 +323,7 @@ namespace ImageConvolution.Tests
             {
                 InputPath = "input.jpg",
                 OutputPath = "output.jpg",
-                ImageData = new float[5, 5]
+                ImageData = new byte[5, 5]
             };
 
             Assert.Equal("input.jpg", task.InputPath);
@@ -318,7 +337,7 @@ namespace ImageConvolution.Tests
             var result = new ProcessingResult
             {
                 OutputPath = "output.jpg",
-                ResultData = new float[5, 5],
+                ResultData = new byte[5, 5],
                 ProcessedBy = ProcessorType.GPU
             };
 
@@ -334,8 +353,8 @@ namespace ImageConvolution.Tests
 
             Assert.True(config.CpuWorkers > 0);
             Assert.Equal(1, config.GpuWorkers);
-            Assert.Equal(2, config.ReaderThreads);
-            Assert.Equal(2, config.WriterThreads);
+            Assert.Equal(1, config.ReaderThreads);
+            Assert.Equal(1, config.WriterThreads);
             Assert.NotNull(config.Kernel);
             Assert.Equal(EdgeStrategy.Extend, config.Strategy);
         }
@@ -353,7 +372,7 @@ namespace ImageConvolution.Tests
             processor.Dispose();
         }
 
-        [Fact]
+        [CudaFact]
         public void GpuProcessor_DisposeMultipleTimes_DoesNotThrow()
         {
             var processor = new GpuConvolutionProcessor();
@@ -361,14 +380,14 @@ namespace ImageConvolution.Tests
             processor.Dispose();
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_LargerKernel_ProcessesCorrectly()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[10, 10];
+            var image = new byte[10, 10];
             for (int i = 0; i < 10; i++)
                 for (int j = 0; j < 10; j++)
-                    image[i, j] = 50f;
+                    image[i, j] = 50;
 
             var largeKernel = new float[5, 5];
             for (int i = 0; i < 5; i++)
@@ -384,9 +403,9 @@ namespace ImageConvolution.Tests
         }
 
         [Fact]
-        public void UnifiedProcessor_WithZeroWorkers_HandlesGracefully()
+        public void UnifiedProcessor_WithZeroWorkers_IsRejected()
         {
-            CreateTestImageFloat(TestDirInput, "test.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -396,20 +415,17 @@ namespace ImageConvolution.Tests
                 WriterThreads = 1
             };
 
-            using var processor = new UnifiedProcessor(config);
-            processor.ProcessDirectory(TestDirInput, TestDirOutput);
-
-            Assert.True(Directory.Exists(TestDirOutput));
+            Assert.Throws<ArgumentException>(() => new UnifiedProcessor(config));
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_SharpenKernel_ProducesValidResult()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[10, 10];
+            var image = new byte[10, 10];
             for (int y = 0; y < 10; y++)
                 for (int x = 0; x < 10; x++)
-                    image[y, x] = (x + y) % 2 == 0 ? 100f : 50f;
+                    image[y, x] = (byte)((x + y) % 2 == 0 ? 100 : 50);
 
             var result = gpuProcessor.ConvolveGpu(image, Kernels.SharpenFloat, EdgeStrategy.Extend);
 
@@ -418,14 +434,14 @@ namespace ImageConvolution.Tests
             Assert.Equal(10, result.GetLength(1));
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_LaplacianKernel_ProducesValidResult()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[10, 10];
+            var image = new byte[10, 10];
             for (int y = 0; y < 10; y++)
                 for (int x = 0; x < 10; x++)
-                    image[y, x] = 100f;
+                    image[y, x] = 100;
 
             var result = gpuProcessor.ConvolveGpu(image, Kernels.LaplacianFloat, EdgeStrategy.ZeroPadding);
 
@@ -437,8 +453,8 @@ namespace ImageConvolution.Tests
         [Fact]
         public void UnifiedProcessor_SingleReaderSingleWriter_ProcessesCorrectly()
         {
-            CreateTestImageFloat(TestDirInput, "test1.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "test2.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test1.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "test2.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -461,12 +477,12 @@ namespace ImageConvolution.Tests
             Assert.Equal(ProcessorType.GPU, ProcessorType.GPU);
             Assert.NotEqual(ProcessorType.CPU, ProcessorType.GPU);
         }
-        [Fact]
+        [CudaFact]
         public void UnifiedProcessor_LargeNumberOfFiles_ProcessesAll()
         {
             for (int i = 0; i < 10; i++)
             {
-                CreateTestImageFloat(TestDirInput, $"test{i:D3}.jpg", 10, 10);
+                CreateTestImageByte(TestDirInput, $"test{i:D3}.jpg", 10, 10);
             }
 
             var config = new UnifiedProcessorConfig
@@ -483,14 +499,14 @@ namespace ImageConvolution.Tests
             Assert.Equal(10, Directory.GetFiles(TestDirOutput).Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_EdgePixels_ExtendStrategy()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[5, 5];
+            var image = new byte[5, 5];
             for (int y = 0; y < 5; y++)
                 for (int x = 0; x < 5; x++)
-                    image[y, x] = (y == 0 || x == 0 || y == 4 || x == 4) ? 255f : 128f;
+                    image[y, x] = (byte)((y == 0 || x == 0 || y == 4 || x == 4) ? 255 : 128);
 
             var result = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
 
@@ -499,14 +515,14 @@ namespace ImageConvolution.Tests
             Assert.True(result[4, 4] > 0);
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_EdgePixels_ZeroPaddingStrategy()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[5, 5];
+            var image = new byte[5, 5];
             for (int y = 0; y < 5; y++)
                 for (int x = 0; x < 5; x++)
-                    image[y, x] = 200f;
+                    image[y, x] = 200;
 
             var result = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.ZeroPadding);
 
@@ -515,11 +531,11 @@ namespace ImageConvolution.Tests
         }
 
         [Fact]
-        public void UnifiedProcessor_MixedImageSizes_OnlyProcessesFirst()
+        public void UnifiedProcessor_MixedImageSizes_ProcessesAll()
         {
-            CreateTestImageFloat(TestDirInput, "small.jpg", 5, 5);
-            CreateTestImageFloat(TestDirInput, "medium.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "large.jpg", 15, 15);
+            CreateTestImageByte(TestDirInput, "small.jpg", 5, 5);
+            CreateTestImageByte(TestDirInput, "medium.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "large.jpg", 15, 15);
 
             var config = new UnifiedProcessorConfig
             {
@@ -532,15 +548,15 @@ namespace ImageConvolution.Tests
 
             Assert.True(Directory.Exists(TestDirOutput));
             var files = Directory.GetFiles(TestDirOutput);
-            Assert.True(files.Length >= 1);
+            Assert.Equal(3, files.Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void ProcessDirectory_MultipleIdenticalSizeImages_ProcessesAll()
         {
             for (int i = 0; i < 3; i++)
             {
-                CreateTestImageFloat(TestDirInput, $"image{i}.jpg", 20, 20);
+                CreateTestImageByte(TestDirInput, $"image{i}.jpg", 20, 20);
             }
 
             GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.SharpenFloat, EdgeStrategy.ZeroPadding);
@@ -548,12 +564,12 @@ namespace ImageConvolution.Tests
             Assert.Equal(3, Directory.GetFiles(TestDirOutput).Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void UnifiedProcessor_OnlyGpuWorkers_ProcessesCorrectly()
         {
-            CreateTestImageFloat(TestDirInput, "gpu1.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "gpu2.jpg", 10, 10);
-            CreateTestImageFloat(TestDirInput, "gpu3.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "gpu1.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "gpu2.jpg", 10, 10);
+            CreateTestImageByte(TestDirInput, "gpu3.jpg", 10, 10);
 
             var config = new UnifiedProcessorConfig
             {
@@ -569,12 +585,12 @@ namespace ImageConvolution.Tests
             Assert.Equal(3, Directory.GetFiles(TestDirOutput).Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void UnifiedProcessor_HighParallelism_ProcessesCorrectly()
         {
             for (int i = 0; i < 8; i++)
             {
-                CreateTestImageFloat(TestDirInput, $"parallel{i}.jpg", 10, 10);
+                CreateTestImageByte(TestDirInput, $"parallel{i}.jpg", 10, 10);
             }
 
             var config = new UnifiedProcessorConfig
@@ -591,14 +607,14 @@ namespace ImageConvolution.Tests
             Assert.Equal(8, Directory.GetFiles(TestDirOutput).Length);
         }
 
-        [Fact]
+        [CudaFact]
         public void ConvolveGpu_AllKernelTypes_Work()
         {
             using var gpuProcessor = new GpuConvolutionProcessor();
-            var image = new float[10, 10];
+            var image = new byte[10, 10];
             for (int y = 0; y < 10; y++)
                 for (int x = 0; x < 10; x++)
-                    image[y, x] = 100f;
+                    image[y, x] = 100;
 
             var blurResult = gpuProcessor.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
             var sharpenResult = gpuProcessor.ConvolveGpu(image, Kernels.SharpenFloat, EdgeStrategy.Extend);
@@ -609,7 +625,7 @@ namespace ImageConvolution.Tests
             Assert.NotNull(laplacianResult);
         }
         [Fact]
-        public void UnifiedProcessor_CorruptImage_CaughtByReaderAgent()
+        public void UnifiedProcessor_CorruptImage_IsRejectedDuringMemoryEstimate()
         {
             Directory.CreateDirectory(TestDirInput);
             File.WriteAllText(Path.Combine(TestDirInput, "corrupt.jpg"), "not an image data");
@@ -617,24 +633,18 @@ namespace ImageConvolution.Tests
             var config = new UnifiedProcessorConfig { CpuWorkers = 1, GpuWorkers = 1 };
             using var processor = new UnifiedProcessor(config);
 
-            processor.ProcessDirectory(TestDirInput, TestDirOutput);
-
-            Assert.True(true);
+            Assert.Throws<SixLabors.ImageSharp.UnknownImageFormatException>(
+                () => processor.ProcessDirectory(TestDirInput, TestDirOutput));
         }
 
-        [Fact]
+        [CudaFact]
         public void GpuProcessor_ProcessDirectory_CorruptImage()
         {
             Directory.CreateDirectory(TestDirInput);
             File.WriteAllText(Path.Combine(TestDirInput, "corrupt.jpg"), "not an image data");
 
-            try
-            {
-                GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
-            }
-            catch { }
-
-            Assert.True(true);
+            Assert.Throws<SixLabors.ImageSharp.UnknownImageFormatException>(() =>
+                GpuConvolutionProcessor.ProcessDirectory(TestDirInput, TestDirOutput, Kernels.BlurBoxFloat, EdgeStrategy.Extend));
         }
     }
 }

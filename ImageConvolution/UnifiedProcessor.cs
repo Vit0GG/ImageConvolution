@@ -16,13 +16,13 @@ namespace ImageConvolution
     {
         public required string InputPath { get; set; }
         public required string OutputPath { get; set; }
-        public required float[,] ImageData { get; set; } 
+        public required byte[,] ImageData { get; set; }
     }
 
     public class ProcessingResult
     {
         public required string OutputPath { get; set; }
-        public required float[,] ResultData { get; set; }
+        public required byte[,] ResultData { get; set; }
         public ProcessorType ProcessedBy { get; set; }
     }
 
@@ -30,8 +30,8 @@ namespace ImageConvolution
     {
         public int CpuWorkers { get; set; } = Math.Max(1, Environment.ProcessorCount / 2);
         public int GpuWorkers { get; set; } = 1;
-        public int ReaderThreads { get; set; } = 1; 
-        public int WriterThreads { get; set; } = 1; 
+        public int ReaderThreads { get; set; } = 1;
+        public int WriterThreads { get; set; } = 1;
         public int QueueCapacity { get; set; } = 4;
         public long MemoryBudgetBytes { get; set; } = 0;
         public ParallelStrategy CpuStrategy { get; set; } = ParallelStrategy.Sequential;
@@ -56,10 +56,15 @@ namespace ImageConvolution
             if (!Enum.IsDefined(config.CpuStrategy)) throw new ArgumentOutOfRangeException(nameof(config));
             this.config = new UnifiedProcessorConfig
             {
-                CpuWorkers = config.CpuWorkers, GpuWorkers = config.GpuWorkers,
-                ReaderThreads = config.ReaderThreads, WriterThreads = config.WriterThreads,
-                QueueCapacity = config.QueueCapacity, MemoryBudgetBytes = config.MemoryBudgetBytes,
-                Kernel = (float[,])config.Kernel.Clone(), Strategy = config.Strategy, CpuStrategy = config.CpuStrategy
+                CpuWorkers = config.CpuWorkers,
+                GpuWorkers = config.GpuWorkers,
+                ReaderThreads = config.ReaderThreads,
+                WriterThreads = config.WriterThreads,
+                QueueCapacity = config.QueueCapacity,
+                MemoryBudgetBytes = config.MemoryBudgetBytes,
+                Kernel = (float[,])config.Kernel.Clone(),
+                Strategy = config.Strategy,
+                CpuStrategy = config.CpuStrategy
             };
         }
 
@@ -83,7 +88,23 @@ namespace ImageConvolution
             int deviceCount = config.GpuWorkers > 0 ? GpuConvolutionProcessor.GetDeviceCount() : 0;
             if (config.GpuWorkers > 0 && deviceCount == 0)
                 throw new InvalidOperationException("Запрошены GPU агенты, но CUDA устройства не найдены");
-            using var slots = new SemaphoreSlim(ImageFiles.GetInFlightLimit(files, config.MemoryBudgetBytes, 8));
+            int limit = PerformanceProfiler.Measure("setup.memory_limit", () => ImageFiles.GetInFlightLimit(files, config.MemoryBudgetBytes, ImageFiles.EstimatedInFlightBytesPerPixel));
+            PerformanceProfiler.Set("pipeline", new
+            {
+                inputDirectory,
+                files = files.Length,
+                cpuWorkers = config.CpuWorkers,
+                gpuWorkers = config.GpuWorkers,
+                readers = config.ReaderThreads,
+                writers = config.WriterThreads,
+                queueCapacity = config.QueueCapacity,
+                inFlightLimit = limit,
+                pixelType = "byte",
+                deviceCount,
+                cpuStrategy = config.CpuStrategy.ToString(),
+                config.MemoryBudgetBytes
+            });
+            using var slots = new SemaphoreSlim(limit);
             using var cancellation = new CancellationTokenSource();
             var token = cancellation.Token;
             var inputChannel = Channel.CreateBounded<ProcessingTask>(config.QueueCapacity);
@@ -110,12 +131,15 @@ namespace ImageConvolution
             {
                 while (filesQueue.TryDequeue(out var file))
                 {
-                    await slots.WaitAsync(token);
-                    var data = ImageIO.LoadAsGrayscaleFloat(file);
-                    await inputChannel.Writer.WriteAsync(new ProcessingTask
-                    {
-                        InputPath = file, OutputPath = Path.Combine(outputDirectory, Path.GetFileName(file)), ImageData = data
-                    }, token);
+                    using (PerformanceProfiler.Measure("reader.wait_slot")) await slots.WaitAsync(token);
+                    var data = PerformanceProfiler.Measure("reader.load", () => ImageIO.LoadAsGrayscaleByte(file));
+                    using (PerformanceProfiler.Measure("reader.enqueue"))
+                        await inputChannel.Writer.WriteAsync(new ProcessingTask
+                        {
+                            InputPath = file,
+                            OutputPath = Path.Combine(outputDirectory, Path.GetFileName(file)),
+                            ImageData = data
+                        }, token);
                     data = null!;
                 }
             })).ToArray();
@@ -128,14 +152,17 @@ namespace ImageConvolution
                 {
                     using var gpu = new GpuConvolutionProcessor(deviceIndex);
                     Console.WriteLine($"GPU агент: устройство {deviceIndex}, {gpu.accelerator.Name}");
-                    await foreach (var item in inputChannel.Reader.ReadAllAsync(token))
+                    await foreach (var item in PerformanceProfiler.ConsumeAsync(inputChannel.Reader, "gpu.wait_input", token))
                     {
                         var result = gpu.ConvolveGpu(item.ImageData, config.Kernel, config.Strategy);
-                        item.ImageData = new float[0, 0];
-                        await outputChannel.Writer.WriteAsync(new ProcessingResult
-                        {
-                            OutputPath = item.OutputPath, ResultData = result, ProcessedBy = ProcessorType.GPU
-                        }, token);
+                        item.ImageData = new byte[0, 0];
+                        using (PerformanceProfiler.Measure("gpu.enqueue_result"))
+                            await outputChannel.Writer.WriteAsync(new ProcessingResult
+                            {
+                                OutputPath = item.OutputPath,
+                                ResultData = result,
+                                ProcessedBy = ProcessorType.GPU
+                            }, token);
                         result = null!;
                     }
                 }));
@@ -143,24 +170,27 @@ namespace ImageConvolution
             for (int i = 0; i < config.CpuWorkers; i++)
                 workers.Add(Start(async () =>
                 {
-                    await foreach (var item in inputChannel.Reader.ReadAllAsync(token))
+                    await foreach (var item in PerformanceProfiler.ConsumeAsync(inputChannel.Reader, "cpu.wait_input", token))
                     {
                         var result = ConvolveCpu(item.ImageData, config.Kernel, config.Strategy, config.CpuStrategy);
-                        item.ImageData = new float[0, 0];
-                        await outputChannel.Writer.WriteAsync(new ProcessingResult
-                        {
-                            OutputPath = item.OutputPath, ResultData = result, ProcessedBy = ProcessorType.CPU
-                        }, token);
+                        item.ImageData = new byte[0, 0];
+                        using (PerformanceProfiler.Measure("cpu.enqueue_result"))
+                            await outputChannel.Writer.WriteAsync(new ProcessingResult
+                            {
+                                OutputPath = item.OutputPath,
+                                ResultData = result,
+                                ProcessedBy = ProcessorType.CPU
+                            }, token);
                         result = null!;
                     }
                 }));
             var workerCompletion = Complete(workers.ToArray(), () => outputChannel.Writer.TryComplete());
             var writers = Enumerable.Range(0, config.WriterThreads).Select(_ => Start(async () =>
             {
-                await foreach (var result in outputChannel.Reader.ReadAllAsync(token))
+                await foreach (var result in PerformanceProfiler.ConsumeAsync(outputChannel.Reader, "writer.wait_input", token))
                 {
-                    ImageIO.SaveImageFloat(result.ResultData, result.OutputPath);
-                    result.ResultData = new float[0, 0];
+                    using (PerformanceProfiler.Measure("writer.save")) ImageIO.SaveImageByte(result.ResultData, result.OutputPath);
+                    result.ResultData = new byte[0, 0];
                     Interlocked.Increment(ref processedCount);
                     if (result.ProcessedBy == ProcessorType.CPU) Interlocked.Increment(ref cpuCount);
                     else Interlocked.Increment(ref gpuCount);
@@ -169,10 +199,11 @@ namespace ImageConvolution
             })).ToArray();
             await Task.WhenAll(writers.Append(readerCompletion).Append(workerCompletion));
             if (failure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            PerformanceProfiler.Set("completed", new { total = processedCount, cpu = cpuCount, gpu = gpuCount });
             Console.WriteLine($"Обработано {processedCount}/{files.Length}; CPU: {cpuCount}, GPU: {gpuCount}; {timer.Elapsed.TotalMilliseconds:F1} мс");
         }
 
-        public static float[,] ConvolveCpu(float[,] image, float[,] kernel, EdgeStrategy strategy, ParallelStrategy parallelStrategy = ParallelStrategy.Sequential)
+        public static byte[,] ConvolveCpu(byte[,] image, float[,] kernel, EdgeStrategy strategy, ParallelStrategy parallelStrategy = ParallelStrategy.Sequential)
         {
             return ConvolutionCore.Convolve(image, kernel, strategy, parallelStrategy);
         }

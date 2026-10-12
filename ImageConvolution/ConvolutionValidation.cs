@@ -25,6 +25,9 @@ internal static class ConvolutionValidation
 
 internal static class ImageFiles
 {
+    // Two byte matrices plus temporary decoded RGBA and output image buffers.
+    // This is a conservative concurrency estimate, not the stored pixel type.
+    public const int EstimatedInFlightBytesPerPixel = 8;
     private static readonly HashSet<string> Extensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"

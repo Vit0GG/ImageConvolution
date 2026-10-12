@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Data;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -12,18 +12,52 @@ using SixLabors.ImageSharp.PixelFormats;
 
 namespace ImageConvolution
 {
-    public enum EdgeStrategy
-    {
-        Extend,
-        ZeroPadding
-    }
+    public enum EdgeStrategy { Extend, ZeroPadding }
 
     [ExcludeFromCodeCoverage]
     class Program
     {
+        static string? ReadPath() => Console.ReadLine()?.Trim('"', ' ', '\'');
+
+        static int ReadCount(string prompt, int fallback, bool allowZero = false)
+        {
+            Console.Write(prompt);
+            string? value = Console.ReadLine();
+            if (string.IsNullOrWhiteSpace(value)) return fallback;
+            if (!int.TryParse(value, out int count) || count < (allowZero ? 0 : 1))
+                throw new ArgumentException("Некорректное количество агентов");
+            return count;
+        }
+
+        static string OutputFolder(string input, string name)
+        {
+            string? root = Environment.GetEnvironmentVariable("IMAGECONV_OUTPUT_ROOT");
+            return Path.Combine(string.IsNullOrWhiteSpace(root)
+                ? Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(input))) ?? Environment.CurrentDirectory
+                : Path.GetFullPath(root), name);
+        }
+
         static void Main(string[] args)
         {
-
+            if (args.Length > 0 && args[0] == "--byte-layout")
+            {
+                ByteLayoutExperiment.Run(args);
+                return;
+            }
+            if (args.Length > 0 && args[0] == "--locality-parallel-control")
+            {
+                if (args.Length < 2 || args.Length > 4 || !File.Exists(args[1]))
+                    throw new ArgumentException("--locality-parallel-control путь_к_файлу [число_разделов] [число_измерений]");
+                int partitions = args.Length > 2 ? int.Parse(args[2]) : Environment.ProcessorCount;
+                int runs = args.Length > 3 ? int.Parse(args[3]) : 7;
+                LocalityExperiment.ParallelControl(args[1], partitions, runs);
+                return;
+            }
+            if (args.Length > 0 && args[0] == "--locality-profile")
+            {
+                LocalityExperiment.HardwareWorkload(args);
+                return;
+            }
 #if DEBUG
             Console.WriteLine("Сборка DEBUG. Для замеров используйте: dotnet run -c Release");
 #endif
@@ -32,318 +66,155 @@ namespace ImageConvolution
             Console.WriteLine("2. Обработать набор файлов");
             Console.WriteLine("3. Обработать набор файлов агентами");
             Console.WriteLine("4. Сравнить с библиотекой ImageSharp");
-            Console.WriteLine("5. Обработать файл на GPU");
+            Console.WriteLine("5. Обработать файл или папку на GPU");
             Console.WriteLine("6. Создать 4K тестовые изображения");
             Console.WriteLine("7. Unified обработка (CPU + GPU)");
             Console.WriteLine("8. Запустить BenchmarkDotNet");
-
+            Console.WriteLine("9. ImageSharp напрямую: без промежуточных массивов яркости");
+            Console.WriteLine("10. Контроль обхода: строки, столбцы, блоки (один файл в памяти)");
+            Console.WriteLine("11. BenchmarkDotNet: контроль обхода без GPU");
+            Console.WriteLine("12. CPU-папка: файлы и свёртка последовательно (аналог GPU-папки)");
+            Console.WriteLine("13. ImageSharp напрямую: загрузка в L8 без промежуточных массивов");
             string? choice = Console.ReadLine();
-
-            if (choice == "1")
+            if (choice is "1" or "2" or "3" or "4" or "5" or "7" or "9" or "12" or "13")
+            {
+                Console.WriteLine("Профиль: 0 — только время; 1 — стадии и ожидания (Enter); 2 — также подробные GPU-этапы.");
+                string? profile = Console.ReadLine();
+                PerformanceProfiler.Mode = string.IsNullOrWhiteSpace(profile) ? 1 : int.TryParse(profile, out int mode) && mode >= 0 && mode <= 2 ? mode : throw new ArgumentException("Неверный режим профиля");
+                Console.WriteLine($"Каждый вариант: {ExperimentRunner.MeasuredRuns} измерений после отдельного прогрева.");
+                Console.WriteLine($"Отчёты: {ExperimentRunner.ResultsDirectory}");
+                if (PerformanceProfiler.Mode == 2)
+                    Console.WriteLine("Подробный GPU-профиль добавляет синхронизацию и может менять время. Сравнивайте одинаковые режимы профилирования.");
+            }
+            if (choice == "10")
             {
                 Console.Write("Введите путь к изображению: ");
-                string? inputPath = Console.ReadLine()?.Trim('\"', ' ', '\'');
-                if (!File.Exists(inputPath)) return;
-
-                double[,] img = ImageIO.LoadAsGrayscale(inputPath);
-
-                double seqMs = MeasureMedianMs(() =>
+                string? path = ReadPath();
+                if (!File.Exists(path)) return;
+                Console.WriteLine("byte; BoxBlur 3x3; Extend; один вычисляющий поток; блок 32x32; выделение результата включено; файлы вне замера.");
+                LocalityExperiment.Run(path);
+            }
+            else if (choice == "11")
+            {
+                PerformanceProfiler.Mode = 0;
+                BenchmarkRunner.Run<LocalityBenchmarks>();
+            }
+            else if (choice == "1")
+            {
+                Console.Write("Введите путь к изображению: ");
+                string? path = ReadPath();
+                if (!File.Exists(path)) return;
+                byte[,] image = ImageIO.LoadAsGrayscaleByte(path);
+                foreach (var strategy in new[] { ParallelStrategy.Sequential, ParallelStrategy.ParallelByRows, ParallelStrategy.ParallelByColumns })
+                    ExperimentRunner.Run("Single-" + strategy, () =>
+                    {
+                        PerformanceProfiler.Set("input", Path.GetFullPath(path));
+                        PerformanceProfiler.Set("timingBoundary", "Image already in RAM; convolution and result allocation only");
+                        _ = ConvolutionCore.Convolve(image, Kernels.BlurBox, EdgeStrategy.Extend, strategy);
+                    });
+                byte[,] result = ConvolutionProcessor.Convolve(image, Kernels.BlurBox);
+                string stem = Path.Combine(Path.GetDirectoryName(path)!, Path.GetFileNameWithoutExtension(path) + "_filtered");
+                int index = 1;
+                string output;
+                do { output = stem + "_" + index++ + Path.GetExtension(path); } while (File.Exists(output));
+                ImageIO.SaveImageByte(result, output);
+                Console.WriteLine($"Сохранено: {output}");
+            }
+            else if (choice is "2" or "3" or "4" or "7" or "9" or "12" or "13")
+            {
+                Console.Write("Введите путь к папке: ");
+                string? input = ReadPath();
+                if (string.IsNullOrWhiteSpace(input) || !Directory.Exists(input)) return;
+                if (choice == "12")
+                    ExperimentRunner.Run("Batch-CPU-Sequential", () => BatchProcessor.ProcessImagesSequential(input,
+                        OutputFolder(input, "CPU_Sequential_Output")));
+                else if (choice == "2")
+                    foreach (var strategy in new[] { ParallelStrategy.Sequential, ParallelStrategy.ParallelByRows, ParallelStrategy.ParallelByColumns })
+                        ExperimentRunner.Run("Batch-" + strategy, () => BatchProcessor.ProcessImagesNaiveParallel(input, OutputFolder(input, "Processed_" + strategy), strategy));
+                else if (choice == "3")
                 {
-                    _ = ConvolutionProcessor.Convolve(img, Kernels.BlurBox, EdgeStrategy.Extend);
-                });
-
-                double parMs = MeasureMedianMs(() =>
-                {
-                    _ = ParallelConvolutionProcessor.ConvolveParallel(img, Kernels.BlurBox, EdgeStrategy.Extend);
-                });
-
-                Console.WriteLine($"Compute only (median): seq={seqMs:F3} ms, parallel={parMs:F3} ms");
-                double[,] res = ConvolutionProcessor.Convolve(img, Kernels.BlurBox);
-
-                string directory = Path.GetDirectoryName(inputPath)!;
-                string fileNameOnly = Path.GetFileNameWithoutExtension(inputPath);
-                string extension = Path.GetExtension(inputPath);
-
-                string baseOutputPath = Path.Combine(directory, $"{fileNameOnly}_filtered");
-
-                int counter = 1;
-                string finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
-
-                while (File.Exists(finalOutputPath))
-                {
-                    counter++;
-                    finalOutputPath = $"{baseOutputPath}_{counter}{extension}";
+                    int workers = ReadCount($"Вычислительных агентов (Enter для {Environment.ProcessorCount}): ", Environment.ProcessorCount);
+                    int readers = ReadCount("Агентов чтения (Enter для 1): ", 1);
+                    int writers = ReadCount("Агентов записи (Enter для 1): ", 1);
+                    ExperimentRunner.Run($"Agents-{workers}-R{readers}-W{writers}", () => AgentProcessor.ProcessImagesWithAgents(input,
+                        OutputFolder(input, "Agent_Processed_Output"), workers, readerCount: readers, writerCount: writers));
                 }
-
-                ImageIO.SaveImage(res, finalOutputPath);
-                Console.WriteLine($"\nГотово! Изображение сохранено здесь:\n{finalOutputPath}");
-            }
-           else if (choice == "2")
-            {
-                Console.WriteLine("Введите исходный путь к папке или перетащите её");
-                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
-                
-                if (string.IsNullOrEmpty(inputDir)) return;
-                
-                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir) ?? "", 
-                    "Processed_Output");
-                
-                Console.WriteLine("Прогрев...");
-                BatchProcessor.ProcessImagesNaiveParallel(
-                    inputDir, outputDir + "_Warmup", ParallelStrategy.Sequential);
-                
-                Console.WriteLine("\n--- ТЕСТ 1: Последовательная свёртка ---");
-                var times1 = MeasureMultipleRuns(() =>
+                else if (choice == "4")
+                    ExperimentRunner.Run("ImageSharp", () => LibraryProcessor.ProcessImagesWithImageSharp(input, OutputFolder(input, "ImageSharp_Output")));
+                else if (choice == "9")
+                    ExperimentRunner.Run("ImageSharp-Native", () => LibraryProcessor.ProcessImagesWithImageSharpNative(input, OutputFolder(input, "ImageSharp_Native_Output")));
+                else if (choice == "13")
+                    ExperimentRunner.Run("ImageSharp-Direct-L8", () => LibraryProcessor.ProcessImagesWithImageSharpDirect(input, OutputFolder(input, "ImageSharp_Direct_L8_Output")));
+                else
                 {
-                    BatchProcessor.ProcessImagesNaiveParallel(
-                        inputDir, outputDir + "_Seq", ParallelStrategy.Sequential);
-                }, 3);
-                
-                Console.WriteLine($"  Среднее: {times1.Average():F1} мс");
-                Console.WriteLine($"  Медиана: {CalculateMedian(times1):F1} мс");
-                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times1):F1} мс");
-                
-                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_WarmupRows", ParallelStrategy.ParallelByRows);
-                Console.WriteLine("\n--- ТЕСТ 2: Параллелизм по СТРОКАМ (Y) ---");
-                var times2 = MeasureMultipleRuns(() =>
-                {
-                    BatchProcessor.ProcessImagesNaiveParallel(
-                        inputDir, outputDir + "_ParRows", ParallelStrategy.ParallelByRows);
-                }, 3);
-                
-                Console.WriteLine($"  Среднее: {times2.Average():F1} мс");
-                Console.WriteLine($"  Медиана: {CalculateMedian(times2):F1} мс");
-                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times2):F1} мс");
-                
-                BatchProcessor.ProcessImagesNaiveParallel(inputDir, outputDir + "_WarmupCols", ParallelStrategy.ParallelByColumns);
-                Console.WriteLine("\n--- ТЕСТ 3: Параллелизм по СТОЛБЦАМ (X) ---");
-                var times3 = MeasureMultipleRuns(() =>
-                {
-                    BatchProcessor.ProcessImagesNaiveParallel(
-                        inputDir, outputDir + "_ParCols", ParallelStrategy.ParallelByColumns);
-                }, 3);
-                
-                Console.WriteLine($"  Среднее: {times3.Average():F1} мс");
-                Console.WriteLine($"  Медиана: {CalculateMedian(times3):F1} мс");
-                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times3):F1} мс");
-            }
-            else if (choice == "3")
-            {
-                Console.WriteLine("Введите путь к папке:");
-                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
-                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
-
-                Console.Write("Введите количество агентов для свёртки (от количества ядер на устройстве): ");
-                if (!int.TryParse(Console.ReadLine(), out int workerCount) || workerCount <= 0)
-                {
-                    workerCount = Environment.ProcessorCount;
+                    int cpu = ReadCount("CPU агентов (Enter для auto; 0 — без CPU-свёртки): ", Math.Max(1, Environment.ProcessorCount / 2), true);
+                    int gpu = ReadCount("GPU агентов (Enter для 1; 0 — без GPU): ", 1, true);
+                    int readers = ReadCount("Агентов чтения (Enter для 1): ", 1);
+                    int writers = ReadCount("Агентов записи (Enter для 1): ", 1);
+                    var config = new UnifiedProcessorConfig
+                    {
+                        CpuWorkers = cpu,
+                        GpuWorkers = gpu,
+                        ReaderThreads = readers,
+                        WriterThreads = writers,
+                        Kernel = Kernels.BlurBoxFloat,
+                        Strategy = EdgeStrategy.Extend
+                    };
+                    ExperimentRunner.Run($"Unified-CPU{cpu}-GPU{gpu}-R{readers}-W{writers}", () =>
+                    {
+                        using var processor = new UnifiedProcessor(config);
+                        processor.ProcessDirectory(input, OutputFolder(input, "Unified_Output"));
+                    });
                 }
-
-                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Agent_Processed_Output");
-
-                Console.WriteLine("Прогрев...");
-                AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir + "_Warmup", workerCount);
-
-                Console.WriteLine($"\n--- Обработка агентами ({workerCount} агентов) ---");
-                var times = MeasureMultipleRuns(() =>
-                {
-                    AgentProcessor.ProcessImagesWithAgents(inputDir, outputDir, workerCount);
-                }, 3);
-
-                Console.WriteLine($"  Среднее: {times.Average():F1} мс");
-                Console.WriteLine($"  Медиана: {CalculateMedian(times):F1} мс");
-                Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times):F1} мс");
             }
-            else if (choice == "4")
-            {
-                Console.WriteLine("Введите путь к папке:");
-                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
-                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
-
-                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "ImageSharp_Output");
-
-                double ms = MeasureMedianMs(() =>
-                {
-LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
-                });
-
-                Console.WriteLine($"ImageSharp blur (median): {ms:F3} ms");
-            }
-
             else if (choice == "5")
             {
-                Console.Write("Введите путь к файлу или папке для обработки на GPU: ");
-                string? path = Console.ReadLine()?.Trim('\"', ' ', '\'');
-
-                if (string.IsNullOrEmpty(path)) return;
-
+                Console.Write("Введите путь к файлу или папке: ");
+                string? path = ReadPath();
+                if (string.IsNullOrWhiteSpace(path)) return;
                 if (File.Exists(path))
                 {
-                    Console.WriteLine("\nРежим: обработка одного файла на GPU.");
-                    float[,] img = ImageIO.LoadAsGrayscaleFloat(path);
-
-                    using var gpuProcessor = new GpuConvolutionProcessor();
-
-                    Console.WriteLine("Прогрев GPU...");
-                    _ = gpuProcessor.ConvolveGpu(img, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
-
-                    Console.WriteLine("\n--- Замер производительности свёртки на GPU ---");
-                    double gpuMs = MeasureMedianMs(() =>
+                    byte[,] image = ImageIO.LoadAsGrayscaleByte(path);
+                    using var gpu = new GpuConvolutionProcessor();
+                    ExperimentRunner.Run("Single-GPU-byte", () =>
                     {
-                        _ = gpuProcessor.ConvolveGpu(img, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
-                    }, warmupRuns: 1, measuredRuns: 5);
-
-                    Console.WriteLine($"\nРезультат: время свёртки (медиана): {gpuMs:F3} мс");
-
-                    string dir = Path.GetDirectoryName(path)!;
-                    string fname = Path.GetFileNameWithoutExtension(path);
-                    string ext = Path.GetExtension(path);
-                    string outputPath = Path.Combine(dir, $"{fname}_gpu_processed{ext}");
-
-                    float[,] res = gpuProcessor.ConvolveGpu(img, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
-                    ImageIO.SaveImageFloat(res, outputPath);
-                    Console.WriteLine($"Результат сохранен в: {outputPath}");
+                        PerformanceProfiler.Set("input", Path.GetFullPath(path));
+                        PerformanceProfiler.Set("timingBoundary", "Image in RAM; GPU already initialized; transfers and result included");
+                        _ = gpu.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend);
+                    });
+                    string output = Path.Combine(Path.GetDirectoryName(path)!, Path.GetFileNameWithoutExtension(path) + "_gpu_processed" + Path.GetExtension(path));
+                    ImageIO.SaveImageByte(gpu.ConvolveGpu(image, Kernels.BlurBoxFloat, EdgeStrategy.Extend), output);
+                    Console.WriteLine($"Сохранено: {output}");
                 }
                 else if (Directory.Exists(path))
-                {
-                    Console.WriteLine("\nРежим: пакетная обработка на GPU.");
-                    string outputDir = Path.Combine(Path.GetDirectoryName(path)!, "GPU_Batch_Output");
-
-                    Console.WriteLine("Прогрев GPU...");
-                    GpuConvolutionProcessor.ProcessDirectory(path, outputDir + "_Warmup", Kernels.BlurBoxFloat, EdgeStrategy.Extend, false);
-
-                    Console.WriteLine("\n--- Замер пакетной обработки на GPU ---");
-                    var times = MeasureMultipleRuns(() =>
-                    {
-                        GpuConvolutionProcessor.ProcessDirectory(path, outputDir, Kernels.BlurBoxFloat, EdgeStrategy.Extend, false);
-                    }, 3);
-
-                    Console.WriteLine($"\n  Среднее: {times.Average():F1} мс");
-                    Console.WriteLine($"  Медиана: {CalculateMedian(times):F1} мс");
-                    Console.WriteLine($"  Станд. отклонение: {CalculateStdDev(times):F1} мс");
-                }
+                    ExperimentRunner.Run("Batch-GPU-byte", () => GpuConvolutionProcessor.ProcessDirectory(path,
+                        OutputFolder(path, "GPU_Batch_Output"), Kernels.BlurBoxFloat, EdgeStrategy.Extend, false));
             }
-
             else if (choice == "6")
             {
-                string outputDir = Path.Combine(Environment.CurrentDirectory, "Test4K");
-                Directory.CreateDirectory(outputDir);
-
-                int count = 100;
-                Console.WriteLine($"Создание {count} изображений 4K...");
-
-                for (int i = 0; i < count; i++)
+                string output = Path.Combine(Environment.CurrentDirectory, "Test4K");
+                Directory.CreateDirectory(output);
+                for (int i = 0; i < 100; i++)
                 {
-                    double[,] image = new double[2160, 3840];
-                    var rand = new Random(i);
+                    var image = new byte[2160, 3840];
+                    var random = new Random(i);
                     for (int y = 0; y < 2160; y++)
-                    {
-                        for (int x = 0; x < 3840; x++)
-                        {
-                            image[y, x] = rand.Next(0, 256);
-                        }
-                    }
-                    ImageIO.SaveImage(image, Path.Combine(outputDir, $"test_{i:000}.jpg"));
-                    Console.WriteLine($"Создано: {i + 1}/{count}");
+                        for (int x = 0; x < 3840; x++) image[y, x] = (byte)random.Next(256);
+                    ImageIO.SaveImageByte(image, Path.Combine(output, $"test_{i:000}.jpg"));
+                    Console.WriteLine($"Создано {i + 1}/100");
                 }
-                Console.WriteLine($"Готово, Папка: {outputDir}");
-            }
-            else if (choice == "7")
-            {
-                Console.WriteLine("Введите путь к папке:");
-                string? inputDir = Console.ReadLine()?.Trim('\"', ' ', '\'');
-                if (string.IsNullOrEmpty(inputDir) || !Directory.Exists(inputDir)) return;
-
-                Console.Write("CPU воркеров (Enter для auto): ");
-                string? cpuInput = Console.ReadLine();
-                int cpuWorkers = string.IsNullOrEmpty(cpuInput) ? Math.Max(1, Environment.ProcessorCount / 2) : int.TryParse(cpuInput, out int cpuValue) && cpuValue >= 0 ? cpuValue : throw new ArgumentException("Некорректное число CPU агентов");
-
-                Console.Write("GPU воркеров (Enter для 1): ");
-                string? gpuInput = Console.ReadLine();
-                int gpuWorkers = string.IsNullOrEmpty(gpuInput) ? 1 : int.TryParse(gpuInput, out int gpuValue) && gpuValue >= 0 ? gpuValue : throw new ArgumentException("Некорректное число GPU агентов");
-
-                string outputDir = Path.Combine(Path.GetDirectoryName(inputDir)!, "Unified_Output");
-
-                var config = new UnifiedProcessorConfig
-                {
-                    CpuWorkers = cpuWorkers,
-                    GpuWorkers = gpuWorkers,
-                    ReaderThreads = 1,
-                    WriterThreads = 1,
-                    Kernel = Kernels.BlurBoxFloat,
-                    Strategy = EdgeStrategy.Extend
-                };
-
-                Console.WriteLine("\nПрогрев...");
-                using (var processor = new UnifiedProcessor(config))
-                {
-                    processor.ProcessDirectory(inputDir, outputDir + "_Warmup");
-                }
-
-                Console.WriteLine("\n\n=== Основной запуск ===");
-                using (var processor = new UnifiedProcessor(config))
-                {
-                    processor.ProcessDirectory(inputDir, outputDir);
-                }
+                Console.WriteLine($"Готово: {output}");
             }
             else if (choice == "8")
             {
-                Console.WriteLine("Внимание: BenchmarkDotNet требует сборки в режиме Release, иначе результаты будут с предупреждением.");
+                PerformanceProfiler.Mode = 0;
+                Console.WriteLine("BenchmarkDotNet: 25 измеряемых итераций на каждый метод и размер; прогрев отдельно. Итерация может содержать несколько вызовов.");
                 BenchmarkRunner.Run<ConvolutionBenchmarks>();
             }
-            else
-            {
-                Console.WriteLine("Неверный выбор.");
-            }
-
+            else Console.WriteLine("Неверный выбор.");
         }
-        static double MeasureMedianMs(Action action, int warmupRuns = 2, int measuredRuns = 5)
-        {
-            for (int i = 0; i < warmupRuns; i++) action();
-            return CalculateMedian(MeasureMultipleRuns(action, measuredRuns));
-        }
-        static List<double> MeasureMultipleRuns(Action action, int runs)
-        {
-            var times = new List<double>();
-
-            for (int i = 0; i < runs; i++)
-            {
-
-                long startTimestamp = Stopwatch.GetTimestamp();
-                action();
-                long endTimestamp = Stopwatch.GetTimestamp();
-
-                double elapsedMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
-                times.Add(elapsedMs);
-                Console.WriteLine($"  Прогон {i + 1}: {elapsedMs:F1} мс");
-            }
-
-            return times;
-        }
-
-        static double CalculateMedian(List<double> values)
-        {
-            var sorted = values.OrderBy(x => x).ToList();
-            int count = sorted.Count;
-
-            if (count % 2 == 0)
-            {
-                return (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0;
-            }
-            else
-            {
-                return sorted[count / 2];
-            }
-        }
-
-        static double CalculateStdDev(List<double> values)
-        {
-            double avg = values.Average();
-            double sumOfSquares = values.Sum(val => (val - avg) * (val - avg));
-            return Math.Sqrt(sumOfSquares / values.Count);
-        }
-
     }
+
 
     public class ImageIO
     {
@@ -352,7 +223,8 @@ LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
 
         public static byte[,] LoadAsGrayscaleByte(string path)
         {
-            using Image<Rgba32> image = Image.Load<Rgba32>(path);
+            using Image<Rgba32> image = PerformanceProfiler.Measure("io.decode_read", () => Image.Load<Rgba32>(path));
+            using var grayscale = PerformanceProfiler.Measure("io.grayscale_allocate");
             byte[,] result = new byte[image.Height, image.Width];
             image.ProcessPixelRows(accessor =>
             {
@@ -366,213 +238,68 @@ LibraryProcessor.ProcessImagesWithImageSharp(inputDir, outputDir);
             return result;
         }
 
-    public static void SaveImageByte(byte[,] data, string path)
-    {
-        int height = data.GetLength(0);
-        int width = data.GetLength(1);
-        
-        using Image<L8> image = new Image<L8>(width, height);
-
-        image.ProcessPixelRows(accessor =>
+        public static void SaveImageByte(byte[,] data, string path)
         {
-            for (int y = 0; y < height; y++)
+            int height = data.GetLength(0);
+            int width = data.GetLength(1);
+
+            using Image<L8> image = PerformanceProfiler.Measure("io.output_allocate", () => new Image<L8>(width, height));
+
+            image.ProcessPixelRows(accessor =>
             {
-                Span<L8> pixelRow = accessor.GetRowSpan(y);
-                for (int x = 0; x < width; x++)
+                for (int y = 0; y < height; y++)
                 {
-                    pixelRow[x] = new L8(data[y, x]);
+                    Span<L8> pixelRow = accessor.GetRowSpan(y);
+                    for (int x = 0; x < width; x++)
+                    {
+                        pixelRow[x] = new L8(data[y, x]);
+                    }
                 }
-            }
-        });
-        
-        image.Save(path);
+            });
+
+            using (PerformanceProfiler.Measure("io.encode_write")) image.Save(path);
+        }
+
     }
-
-    public static double[,] LoadAsGrayscale(string path)
-    {
-        using Image<Rgba32> image = Image.Load<Rgba32>(path);
-        int width = image.Width;
-        int height = image.Height;
-        double[,] result = new double[height, width];
-
-        image.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < height; y++)
-            {
-                Span<Rgba32> pixelRow = accessor.GetRowSpan(y);
-                for (int x = 0; x < width; x++)
-                {
-                    ref Rgba32 pixel = ref pixelRow[x];
-                    result[y, x] = 0.299 * pixel.R + 0.587 * pixel.G + 0.114 * pixel.B;
-                }
-            }
-        });
-        return result;
-    }
-
-    public static void SaveImage(double[,] data, string path)
-    {
-        int height = data.GetLength(0);
-        int width = data.GetLength(1);
-        using Image<L8> image = new Image<L8>(width, height);
-
-        image.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < height; y++)
-            {
-                Span<L8> pixelRow = accessor.GetRowSpan(y);
-                for (int x = 0; x < width; x++)
-                {
-                    double val = data[y, x];
-                    byte gray = ToByte(val);
-                    pixelRow[x] = new L8(gray);
-                }
-            }
-        });
-        image.Save(path);
-    }
-
-    public static float[,] LoadAsGrayscaleFloat(string path)
-    {
-        using Image<Rgba32> image = Image.Load<Rgba32>(path);
-        int width = image.Width;
-        int height = image.Height;
-        float[,] result = new float[height, width];
-
-        image.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < height; y++)
-            {
-                Span<Rgba32> pixelRow = accessor.GetRowSpan(y);
-                for (int x = 0; x < width; x++)
-                {
-                    ref Rgba32 pixel = ref pixelRow[x];
-                    result[y, x] = (float)(0.299 * pixel.R + 0.587 * pixel.G + 0.114 * pixel.B);
-                }
-            }
-        });
-        return result;
-    }
-
-    public static void SaveImageFloat(float[,] data, string path)
-    {
-        int height = data.GetLength(0);
-        int width = data.GetLength(1);
-        using Image<L8> image = new Image<L8>(width, height);
-
-        image.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < height; y++)
-            {
-                Span<L8> pixelRow = accessor.GetRowSpan(y);
-                for (int x = 0; x < width; x++)
-                {
-                    float val = data[y, x];
-                    byte gray = ToByte(val);
-                    pixelRow[x] = new L8(gray);
-                }
-            }
-        });
-        image.Save(path);
-    }
-}
 
     public class Kernels
     {
-        public static double[,] Sharpen = new double[,]
+        // Пиксели хранятся как byte; дробные коэффициенты нужны для усреднения.
+        public static readonly float[,] Sharpen =
         {
-            {  0, -1,  0},
-            { -1,  5, -1},
-            {  0, -1,  0}
+            { 0, -1, 0 },
+            { -1, 5, -1 },
+            { 0, -1, 0 }
         };
-        public static double[,] Laplacian = new double[,]
+        public static readonly float[,] Laplacian =
         {
-            {-1, -1, -1},
-            {-1,  8, -1},
-            {-1, -1, -1}
+            { -1, -1, -1 },
+            { -1, 8, -1 },
+            { -1, -1, -1 }
         };
-        public static double[,] BlurBox = new double[,]
+        public static readonly float[,] BlurBox =
         {
-            {1.0/9.0, 1.0/9.0, 1.0/9.0},
-            {1.0/9.0, 1.0/9.0, 1.0/9.0},
-            {1.0/9.0, 1.0/9.0, 1.0/9.0}
+            { 1f/9f, 1f/9f, 1f/9f },
+            { 1f/9f, 1f/9f, 1f/9f },
+            { 1f/9f, 1f/9f, 1f/9f }
         };
-        public static float[,] SharpenFloat = new float[,]
-       {
-            {  0, -1,  0},
-            { -1,  5, -1},
-            {  0, -1,  0}
-       };
-        public static float[,] LaplacianFloat = new float[,]
-        {
-            {-1, -1, -1},
-            {-1,  8, -1},
-            {-1, -1, -1}
-        };
-        public static float[,] BlurBoxFloat = new float[,]
-        {
-            {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f},
-            {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f},
-            {1.0f/9.0f, 1.0f/9.0f, 1.0f/9.0f}
-        };
+        public static float[,] SharpenFloat => Sharpen;
+        public static float[,] LaplacianFloat => Laplacian;
+        public static float[,] BlurBoxFloat => BlurBox;
     }
 
     public class ConvolutionProcessor
     {
-        internal static double CalculatePixelValue(double[,] image, double[,] kernel, int x, int y, EdgeStrategy strategy)
-        {
-            double sum = 0.0;
-            int imgheight = image.GetLength(0);
-            int imgwidth = image.GetLength(1);
-            int kheight = kernel.GetLength(0);
-            int kwidth = kernel.GetLength(1);
-            int offsetY = kheight / 2;
-            int offsetX = kwidth / 2;
-
-            for (int ky = 0; ky < kheight; ky++)
-            {
-                for (int kx = 0; kx < kwidth; kx++)
-                {
-                    int pixelY = y + offsetY - ky;
-                    int pixelX = x + offsetX - kx;
-                    double pixelValue = 0.0;
-
-                    if (strategy == EdgeStrategy.Extend)
-                    {
-                        pixelY = Math.Clamp(pixelY, 0, imgheight - 1);
-                        pixelX = Math.Clamp(pixelX, 0, imgwidth - 1);
-                        pixelValue = image[pixelY, pixelX];
-                    }
-                    else if (strategy == EdgeStrategy.ZeroPadding)
-                    {
-                        if (pixelY >= 0 && pixelY < imgheight && pixelX >= 0 && pixelX < imgwidth)
-                        {
-                            pixelValue = image[pixelY, pixelX];
-                        }
-                    }
-                    sum += pixelValue * kernel[ky, kx];
-                }
-            }
-            return sum;
-        }
-
-        public static double[,] Convolve(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
-        {
-            return ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.Sequential);
-        }
+        public static byte[,] Convolve(byte[,] image, float[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend) =>
+            ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.Sequential);
     }
+
     public class ParallelConvolutionProcessor
     {
+        public static byte[,] ConvolveParallel(byte[,] image, float[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend) =>
+            ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.ParallelByRows);
 
-        public static double[,] ConvolveParallel(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
-        {
-            return ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.ParallelByRows);
-        }
-
-        public static double[,] ConvolveParallelByColumns(double[,] image, double[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend)
-        {
-            return ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.ParallelByColumns);
-        }
-
+        public static byte[,] ConvolveParallelByColumns(byte[,] image, float[,] kernel, EdgeStrategy strategy = EdgeStrategy.Extend) =>
+            ConvolutionCore.Convolve(image, kernel, strategy, ParallelStrategy.ParallelByColumns);
     }
 }

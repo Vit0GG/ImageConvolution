@@ -14,6 +14,31 @@ namespace ImageConvolution
 
     public class BatchProcessor
     {
+        public static void ProcessImagesSequential(string inputDirectory, string outputDirectory)
+        {
+            if (!Directory.Exists(inputDirectory)) return;
+            ImageFiles.ValidateDirectories(inputDirectory, outputDirectory);
+            Directory.CreateDirectory(outputDirectory);
+            string[] files = ImageFiles.GetFiles(inputDirectory);
+            PerformanceProfiler.Set("batch", new
+            {
+                inputDirectory,
+                files = files.Length,
+                parallelFiles = 1,
+                strategy = ParallelStrategy.Sequential.ToString(),
+                pixelType = "byte",
+                execution = "load -> CPU convolution -> save; sequential files"
+            });
+
+            foreach (string file in files)
+            {
+                byte[,] image = PerformanceProfiler.Measure("reader.load", () => ImageIO.LoadAsGrayscaleByte(file));
+                byte[,] result = ConvolutionProcessor.Convolve(image, Kernels.BlurBox, EdgeStrategy.Extend);
+                using (PerformanceProfiler.Measure("writer.save"))
+                    ImageIO.SaveImageByte(result, Path.Combine(outputDirectory, Path.GetFileName(file)));
+            }
+        }
+
         public static void ProcessImagesNaiveParallel(string inputDirectory, string outputDirectory, ParallelStrategy strategy,
             int maxDegreeOfParallelism = 0, long memoryBudgetBytes = 0)
         {
@@ -34,7 +59,16 @@ namespace ImageConvolution
             using var process = Process.GetCurrentProcess();
             TimeSpan cpuTimeStart = process.TotalProcessorTime;
             var sw = Stopwatch.StartNew();
-            options.MaxDegreeOfParallelism = Math.Min(options.MaxDegreeOfParallelism, ImageFiles.GetInFlightLimit(files, memoryBudgetBytes, 16));
+            options.MaxDegreeOfParallelism = Math.Min(options.MaxDegreeOfParallelism, ImageFiles.GetInFlightLimit(files, memoryBudgetBytes, ImageFiles.EstimatedInFlightBytesPerPixel));
+            PerformanceProfiler.Set("batch", new
+            {
+                inputDirectory,
+                files = files.Length,
+                parallelFiles = options.MaxDegreeOfParallelism,
+                strategy = strategy.ToString(),
+                pixelType = "byte",
+                memoryBudgetBytes
+            });
             Console.WriteLine($"Параллельных файлов: {options.MaxDegreeOfParallelism}; свёртка: {strategy}");
 
             Parallel.ForEach(files, options, currentFile =>
@@ -42,8 +76,8 @@ namespace ImageConvolution
                 string fileName = Path.GetFileName(currentFile);
                 string savePath = Path.Combine(outputDirectory, fileName);
 
-                double[,] imageData = ImageIO.LoadAsGrayscale(currentFile);
-                double[,] result;
+                byte[,] imageData = PerformanceProfiler.Measure("reader.load", () => ImageIO.LoadAsGrayscaleByte(currentFile));
+                byte[,] result;
 
                 switch (strategy)
                 {
@@ -63,7 +97,7 @@ namespace ImageConvolution
                         throw new ArgumentException("Unknown strategy");
                 }
 
-                ImageIO.SaveImage(result, savePath);
+                using (PerformanceProfiler.Measure("writer.save")) ImageIO.SaveImageByte(result, savePath);
             });
 
             sw.Stop();
