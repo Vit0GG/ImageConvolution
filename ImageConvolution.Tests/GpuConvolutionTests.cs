@@ -630,7 +630,7 @@ namespace ImageConvolution.Tests
             Directory.CreateDirectory(TestDirInput);
             File.WriteAllText(Path.Combine(TestDirInput, "corrupt.jpg"), "not an image data");
 
-            var config = new UnifiedProcessorConfig { CpuWorkers = 1, GpuWorkers = 1 };
+            var config = new UnifiedProcessorConfig { CpuWorkers = 1, GpuWorkers = 0 };
             using var processor = new UnifiedProcessor(config);
 
             Assert.Throws<SixLabors.ImageSharp.UnknownImageFormatException>(
