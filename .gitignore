@@ -482,3 +482,33 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+test_input_*
+test_output_*
+ImageConvolution/Agent_Processed_Output/
+ImageConvolution/Processed_Output_Par/
+ImageConvolution/Processed_Output_Seq/
+ImageConvolution/Processed_Output_*/
+repomix-output.*
+repomix-output.xml
+
+# Local benchmark output and generated image fixtures
+MeasurementResults/
+Test4K/
+Processed_*/
+Agent_Processed_Output/
+CPU_Sequential_Output/
+GPU_Batch_Output/
+Unified_Output/
+ImageSharp_Output/
+ImageSharp_Native_Output/
+ImageSharp_Direct_L8_Output/
+
+# Local profiler traces
+*.diagsession
+*.etl
+*.nettrace
+
+# One-off local experiment launchers
+run-*.ps1
+resume-*.ps1
