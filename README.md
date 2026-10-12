@@ -63,4 +63,6 @@ dotnet test ImageConvolution.sln -c Release /p:CollectCoverage=true /p:Threshold
 
 ## Презентации
 
-Исходники и PDF презентаций по CPU- и GPU-частям можно добавить в `docs/presentations/` внутри репозитория.
+- [Презентация: CPU](docs/presentations/cpu.pdf)
+- [Презентация: CPU и GPU](docs/presentations/gpu.pdf)
+
